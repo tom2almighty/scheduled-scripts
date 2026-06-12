@@ -1,5 +1,5 @@
 """
-cron: 0 */6 * * *
+cron: 30 9 * * *
 new Env("Linux.Do 签到")
 """
 

@@ -13,7 +13,7 @@ pip install curl_cffi loguru DrissionPage
 ## 青龙任务
 
 ```text
-13 8 * * * python3 /ql/data/scripts/newapi/newapi.py
+30 9 * * * python3 /ql/data/scripts/newapi/newapi.py
 ```
 
 实际路径按你的青龙脚本目录调整。

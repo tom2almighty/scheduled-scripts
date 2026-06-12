@@ -4,12 +4,12 @@
 NodeSeek 自动签到（青龙面板版），支持多账号。
 签到后调用 /api/account/credit/page-1 读取最新一条积分记录的余额（鸡腿总数）作为成功确认。
 
+cron: 30 9 * * *
+new Env("NodeSeek 签到")
+
 环境变量：
   NS_COOKIE          必填。NodeSeek Cookie；多账号用换行或 & 分隔。
   NS_RANDOM          选填，默认 true。true 随机 0–10 个鸡腿；false 固定 5 个。
-  NS_NOTIFY_SUCCESS  选填，默认 true。false 时仅在异常时推送通知。
-
-建议 cron：30 8 * * *
 """
 
 import os
@@ -22,16 +22,40 @@ except ImportError:
     print("[NodeSeek] 缺少依赖 requests，请在青龙「依赖管理 → Python」中添加 requests 后重试。")
     sys.exit(1)
 
-# 青龙内置通知；本地运行无该模块时回退到 print
-try:
-    from notify import send
-except Exception:
-    send = None
-
 BASE = "https://www.nodeseek.com"
 UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 "
       "(KHTML, like Gecko) Version/18.7.2 Mobile/15E148 Safari/604.1")
 TIMEOUT = 30
+
+
+def _load_ql_send():
+    """加载青龙 notify.py 的 send 方法。"""
+    try:
+        from notify import send  # type: ignore
+
+        return send
+    except Exception:
+        pass
+
+    candidates = [
+        os.environ.get("QL_DIR", "") and os.path.join(os.environ["QL_DIR"], "scripts"),
+        "/ql/data/scripts",
+        "/ql/scripts",
+        os.path.dirname(os.path.abspath(__file__)),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(os.path.join(path, "notify.py")) and path not in sys.path:
+            sys.path.append(path)
+            try:
+                from notify import send  # type: ignore
+
+                return send
+            except Exception:
+                continue
+    return None
+
+
+QL_SEND = _load_ql_send()
 
 
 def parse_bool(v, default=True):
@@ -136,11 +160,15 @@ def checkin_one(session, cookie, random_mode):
 
 
 def notify(title, content):
-    if send:
-        try:
-            send(title, content)
-        except Exception as e:
-            print(f"[NodeSeek] 通知发送失败: {e}")
+    if QL_SEND is None:
+        print(f"[NodeSeek] 未找到青龙通知模块，通知内容：\n【{title}】\n{content}")
+        return
+
+    try:
+        QL_SEND(title, content)
+    except Exception as e:
+        print(f"[NodeSeek] 通知发送失败: {e}")
+        print(f"【{title}】\n{content}")
 
 
 def main():
@@ -152,22 +180,18 @@ def main():
         return
 
     random_mode = parse_bool(os.environ.get("NS_RANDOM"), True)
-    notify_success = parse_bool(os.environ.get("NS_NOTIFY_SUCCESS"), True)
     multi = len(cookies) > 1
 
     print(f"[NodeSeek] 共 {len(cookies)} 个账号待签到（random={random_mode}）")
     session = requests.Session()
     lines = []
-    any_problem = False
     for i, cookie in enumerate(cookies, 1):
-        line, problem = checkin_one(session, cookie, random_mode)
+        line, _ = checkin_one(session, cookie, random_mode)
         full = (f"账号{i}: " if multi else "") + line
         print("[NodeSeek]", full)
         lines.append(full)
-        any_problem = any_problem or problem
 
-    if notify_success or any_problem:
-        notify("NodeSeek 签到", "\n".join(lines))
+    notify("NodeSeek 签到", "\n".join(lines))
 
 
 if __name__ == "__main__":

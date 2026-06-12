@@ -13,7 +13,7 @@ pip install DrissionPage curl_cffi loguru beautifulsoup4 tabulate
 ## 青龙任务
 
 ```text
-0 */6 * * * python3 /ql/data/scripts/linuxdo/linuxdo.py
+30 9 * * * python3 /ql/data/scripts/linuxdo/linuxdo.py
 ```
 
 实际路径按你的青龙脚本目录调整。
