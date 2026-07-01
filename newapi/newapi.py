@@ -152,6 +152,7 @@ BALANCE_FILE = os.path.join(DATA_DIR, 'newapi_balance.json')
 
 WAF_COOKIE_NAMES = ('acw_tc', 'cdn_sec_tc', 'acw_sc__v2')
 WAF_MODES = {'true', 'false', 'auto'}
+RESPONSE_LOG_LIMIT = 180
 
 
 # --------------------------------------------------------------------------- #
@@ -484,9 +485,42 @@ def prepare_site_runtime(site: dict):
 	return {'cookies': {}, 'user_agent': user_agent, 'ready': False}
 
 
+def merge_account_cookies(account_cookies: dict, runtime_cookies: dict) -> dict:
+	"""
+	账号 cookie 保留登录态；本次浏览器获取的 WAF cookie 优先级更高。
+	复制账号 cookie 时经常会带上旧 WAF 值，不能让它覆盖当前运行环境的新值。
+	"""
+	cookies = dict(account_cookies or {})
+	runtime_cookies = runtime_cookies or {}
+	replaced = []
+
+	for name in WAF_COOKIE_NAMES:
+		if name in runtime_cookies:
+			if cookies.get(name) and cookies.get(name) != runtime_cookies[name]:
+				replaced.append(name)
+			cookies[name] = runtime_cookies[name]
+
+	if replaced:
+		logger.info(f'已用本次浏览器获取的 WAF cookies 覆盖账号 cookie 中的旧值：{replaced}')
+	return cookies
+
+
 # --------------------------------------------------------------------------- #
 # 接口请求
 # --------------------------------------------------------------------------- #
+def response_summary(resp) -> str:
+	content_type = ''
+	try:
+		content_type = resp.headers.get('content-type', '')
+	except Exception:
+		pass
+
+	text = (getattr(resp, 'text', '') or '').replace('\n', ' ').replace('\r', ' ').strip()
+	if len(text) > RESPONSE_LOG_LIMIT:
+		text = text[:RESPONSE_LOG_LIMIT] + '...'
+	return f'HTTP {getattr(resp, "status_code", "未知")}，content-type={content_type or "未知"}，body={text or "空"}'
+
+
 def _build_headers(site: dict, user_agent: str, api_user: str, is_post: bool) -> dict:
 	headers = {
 		'User-Agent': user_agent,
@@ -520,7 +554,12 @@ def get_user_info(session, site: dict, cookies: dict, user_agent: str, api_user:
 			logger.warning(f'[{site["name"]}] 获取用户信息失败：HTTP {resp.status_code}')
 			return None
 
-		data = resp.json()
+		try:
+			data = resp.json()
+		except Exception:
+			logger.warning(f'[{site["name"]}] 获取用户信息响应不是 JSON：{response_summary(resp)}')
+			return None
+
 		if not data.get('success'):
 			logger.warning(f'[{site["name"]}] 获取用户信息失败：{data.get("message") or data.get("msg") or "接口返回失败"}')
 			return None
@@ -554,6 +593,7 @@ def do_checkin(session, site: dict, cookies: dict, user_agent: str, api_user: st
 			data = resp.json()
 		except Exception:
 			text = (resp.text or '').lower()
+			logger.warning(f'[{site["name"]}] 签到响应不是 JSON：{response_summary(resp)}')
 			if 'success' in text:
 				return 'success', '签到成功'
 			if any(kw in text for kw in (k.lower() for k in _ALREADY_KEYWORDS)):
@@ -598,7 +638,7 @@ def check_in_account(site: dict, account: dict, runtime: dict) -> dict:
 
 	logger.info(f'==== 开始处理 [{site["name"]}/{name}] ====')
 
-	cookies = {**(runtime.get('cookies') or {}), **account['cookies']}
+	cookies = merge_account_cookies(account['cookies'], runtime.get('cookies') or {})
 	user_agent = runtime.get('user_agent') or default_user_agent()
 
 	session = cffi_requests.Session(impersonate='chrome')
