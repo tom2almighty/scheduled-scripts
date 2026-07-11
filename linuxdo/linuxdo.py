@@ -261,12 +261,8 @@ class LinuxDoBrowser:
             user_ele = self.page.ele("@id=current-user")
         except Exception as e:
             logger.warning(f"Cookie 登录验证异常: {str(e)}")
-            return True
+            return False
         if not user_ele:
-            if "avatar" in self.page.html:
-                logger.info("Cookie 登录验证成功 (通过 avatar)")
-                self.save_current_cookies()
-                return True
             logger.error("Cookie 登录验证失败 (未找到 current-user)，Cookie 可能已过期")
             return False
         else:
@@ -355,14 +351,8 @@ class LinuxDoBrowser:
             user_ele = self.page.ele("@id=current-user")
         except Exception as e:
             logger.warning(f"登录验证失败: {str(e)}")
-            self.save_current_cookies()
-            return True
+            return False
         if not user_ele:
-            # Fallback check for avatar
-            if "avatar" in self.page.html:
-                logger.info("登录验证成功 (通过 avatar)")
-                self.save_current_cookies()
-                return True
             logger.error("登录验证失败 (未找到 current-user)")
             return False
         else:
@@ -577,27 +567,27 @@ class LinuxDoBrowser:
 
     def fetch_connect_info(self):
         logger.info("获取 Connect 活跃信息")
-        headers = {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Referer": HOME_URL,
-        }
-        html = ""
         try:
-            resp = self.session.get(CONNECT_URL, headers=headers, impersonate="chrome136", timeout=30)
-            html = resp.text or ""
-            logger.info(f"Connect 请求状态码: {resp.status_code}")
+            # Connect 依赖浏览器中的登录、跨子域 Cookie 及可能的 SSO 状态，
+            # 必须复用已登录页面，避免独立请求会话因状态不完整返回 403。
+            self.page.get(CONNECT_URL)
+            time.sleep(5)
+            final_url = self.page.url or ""
+            title = getattr(self.page, "title", "") or ""
+            html = self.page.html or ""
+            logger.info(f"Connect 最终页面: {final_url} ({title})")
         except Exception as e:
-            logger.warning(f"Connect 请求异常: {e}")
+            logger.warning(f"浏览器获取 Connect 信息失败: {e}")
+            return {"items": [], "status": ""}
 
         info = self.parse_connect_info(html)
         if not info["items"] and not info["status"]:
-            logger.warning("请求会话未解析到 Connect 数据，尝试使用浏览器打开页面")
-            try:
-                self.page.get(CONNECT_URL)
-                time.sleep(5)
-                info = self.parse_connect_info(self.page.html)
-            except Exception as e:
-                logger.warning(f"浏览器获取 Connect 信息失败: {e}")
+            if "/login" in final_url:
+                logger.warning("Connect 跳转到登录页面，当前 Cookie 登录态无效或未完成授权")
+            elif "403" in title or "forbidden" in html.lower():
+                logger.warning("Connect 页面返回 403，浏览器会话可能被安全策略拦截")
+            else:
+                logger.warning("Connect 页面已打开，但未解析到活跃数据，页面结构可能已变化")
 
         self.log_connect_info(info)
         return info
