@@ -4,8 +4,15 @@
 
 ## 依赖
 
+Python 依赖
 ```bash
-pip install curl_cffi loguru DrissionPage
+curl_cffi loguru DrissionPage playwright
+```
+
+Linux 依赖
+
+```bash
+chromium
 ```
 
 确保青龙环境里有可用的 Chromium/Chrome。
