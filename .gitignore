@@ -22,6 +22,8 @@ env/
 # Local secrets / runtime data
 .env
 .env.*
+!.env.example
+*.session*
 *cookie*.txt
 *cookies*.txt
 *_balance.json
