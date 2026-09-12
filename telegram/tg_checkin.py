@@ -154,24 +154,46 @@ def session_lock(session):
         yield
 
 
-def send_notification(content):
-    LOGGER.info("运行汇总：\n%s", content)
+def _load_ql_send():
+    """沿用 NodeSeek 脚本的青龙 notify.py 加载方式。"""
     try:
-        ql_data = Path(
-            os.environ.get("QL_DATA_DIR")
-            or Path(os.environ.get("QL_DIR", "/ql")) / "data"
-        )
-        candidates = [
-            SCRIPT_DIR,
-            SCRIPT_DIR.parent,
-            ql_data / "scripts",
-            ql_data / "deps",
-        ]
-        for directory in candidates:
-            if (directory / "notify.py").is_file() and str(directory) not in sys.path:
-                sys.path.append(str(directory))
         from notify import send
 
+        return send
+    except Exception:
+        LOGGER.debug("默认导入路径未能加载青龙通知模块，继续查找", exc_info=True)
+
+    candidates = [
+        os.environ.get("QL_DIR", "") and os.path.join(os.environ["QL_DIR"], "scripts"),
+        "/ql/data/scripts",
+        "/ql/scripts",
+        str(SCRIPT_DIR),
+    ]
+    for path in candidates:
+        if (
+            path
+            and os.path.isfile(os.path.join(path, "notify.py"))
+            and path not in sys.path
+        ):
+            sys.path.append(path)
+            try:
+                from notify import send
+
+                return send
+            except Exception:
+                LOGGER.debug(
+                    "从 %s 加载青龙通知模块失败，继续查找", path, exc_info=True
+                )
+    return None
+
+
+def send_notification(content):
+    LOGGER.info("运行汇总：\n%s", content)
+    send = _load_ql_send()
+    if send is None:
+        LOGGER.error("未找到可用的青龙通知模块 notify.py，通知内容已保留在日志中")
+        return False
+    try:
         send("Telegram 多 Bot 签到", content)
         LOGGER.info("已调用青龙 notify.py 的 send 方法")
         return True

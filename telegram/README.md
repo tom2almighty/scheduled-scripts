@@ -77,6 +77,8 @@ task qlscripts/telegram/tg_checkin.py
 
 每次运行结束调用一次青龙 `notify.py` 的 `send`，通知包含各 bot 的用户名、命令、执行状态及回复原文。通知渠道沿用面板配置。
 
+通知模块与 NodeSeek 脚本使用相同的加载方式，支持 `$QL_DIR/scripts`、`/ql/data/scripts`、`/ql/scripts` 和脚本同目录的 `notify.py`。
+
 - 收集本次命令之后该 bot 发来的多条消息；同一条回复被编辑时，保留最后收到的内容。
 - 回复文字及媒体说明文字原样保留，图片和附件显示文字标记。通知为文本内容。
 - 默认首条回复等待受 30 秒总时限约束；收到后连续 3 秒没有变化便结束。回复间隔较长时，增大 `TG_REPLY_WAIT` 和对应 bot 的 `timeout`。
