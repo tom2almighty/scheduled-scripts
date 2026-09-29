@@ -8,7 +8,7 @@ new Env('NewAPI 自动签到');
 
 ----------------------------------------------------------------------------
 实现：多站点 + 多账号 + 签到 + 余额检查 + 余额变化检测 + 青龙通知
-依赖：curl_cffi；若站点启用 WAF，还需要 DrissionPage + chromium 浏览器
+依赖：curl_cffi loguru（纯 Python 实现，零浏览器依赖，内置阿里 WAF 算解）
 通知：直接复用青龙自带的 notify.py 的 send(title, content)
 
 环境变量（在 青龙 > 环境变量 中配置）：
@@ -48,8 +48,6 @@ new Env('NewAPI 自动签到');
   NOTIFY_TRIGGERS       通知触发条件，逗号分隔，默认 always
       可选值：always / never / success / failed / balance_changed
 
-  NEWAPI_BROWSER_PATH   指定 chromium 可执行文件路径（自动探测失败时用）
-  CHROME_PATH           NEWAPI_BROWSER_PATH 未设置时使用
   NEWAPI_DATA_DIR       余额记录文件存放目录，默认脚本同级目录
   TZ                    时区，默认 Asia/Shanghai
 ----------------------------------------------------------------------------
@@ -58,6 +56,7 @@ new Env('NewAPI 自动签到');
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -382,87 +381,41 @@ def save_balance_record(record: dict):
 # --------------------------------------------------------------------------- #
 # WAF cookies
 # --------------------------------------------------------------------------- #
-def _cookies_to_dict(page) -> dict:
-	"""兼容不同 DrissionPage 版本，取出 {name: value} 形式的 cookies。"""
-	try:
-		ck = page.cookies(as_dict=True)
-		if isinstance(ck, dict):
-			return dict(ck)
-	except TypeError:
-		pass
-
-	out = {}
-	try:
-		for c in page.cookies():
-			name = c['name'] if isinstance(c, dict) else getattr(c, 'name', None)
-			if name:
-				out[name] = c['value'] if isinstance(c, dict) else getattr(c, 'value', '')
-	except Exception:
-		pass
-	return out
+WAF_KEY_DEFAULT = '3000176000856006061501533003690027800375'
+WAF_MASK = (
+	15, 35, 29, 24, 33, 16, 1, 38, 10, 9, 19, 31, 40, 27, 22, 23, 25, 13,
+	6, 11, 39, 18, 20, 8, 14, 21, 32, 26, 2, 30, 7, 4, 17, 5, 3, 28, 34,
+	37, 12, 36,
+)
 
 
-def fetch_waf_cookies(site: dict):
-	"""
-	启动 chromium 访问站点登录页，等待 WAF 的 JS 挑战完成后取出 cookies。
+def calc_acw_sc_v2(arg1: str, key: str = WAF_KEY_DEFAULT) -> str:
+	"""纯 Python 算解阿里云盾 acw_sc__v2 cookie。"""
+	if not arg1 or len(arg1) < len(WAF_MASK):
+		return ''
+	unsboxed = ''.join(arg1[pos - 1] for pos in WAF_MASK)
+	res = []
+	for i in range(0, min(len(unsboxed), len(key)), 2):
+		v1 = int(unsboxed[i:i + 2], 16)
+		v2 = int(key[i:i + 2], 16)
+		res.append(f'{v1 ^ v2:02x}')
+	return ''.join(res)
 
-	Returns:
-		(cookies: dict, user_agent: str, ok: bool)
-	"""
-	try:
-		from DrissionPage import ChromiumPage, ChromiumOptions
-	except ImportError:
-		logger.error('未安装 DrissionPage，请先安装：pip install DrissionPage')
-		return {}, default_user_agent(), False
 
-	logger.info(f'[{site["name"]}] 启动浏览器获取 WAF cookies ...')
+def extract_waf_challenge(html: str):
+	"""从响应 HTML 中提取阿里 WAF 的 arg1 与 key。"""
+	if not html or ('acw_sc__v2' not in html and 'arg1' not in html):
+		return None, None
+	match = re.search(r"(?:var\s+)?arg1\s*=\s*['\"]([0-9a-fA-F]{40})['\"]", html)
+	if not match:
+		match = re.search(r"arg1\s*=\s*['\"]([0-9a-fA-F]+)['\"]", html)
+	if not match:
+		return None, None
+	arg1 = match.group(1)
 
-	co = ChromiumOptions()
-	browser_path = os.getenv('NEWAPI_BROWSER_PATH') or os.getenv('CHROME_PATH')
-	if browser_path:
-		co.set_browser_path(browser_path)
-	co.headless()
-	co.auto_port()
-	co.set_argument('--no-sandbox')
-	co.set_argument('--disable-dev-shm-usage')
-	co.set_argument('--disable-gpu')
-	co.set_argument('--disable-blink-features=AutomationControlled')
-	co.set_argument('--window-size', '1920,1080')
-
-	page = None
-	try:
-		page = ChromiumPage(addr_or_opts=co)
-		page.get(site['login_url'], retry=2, timeout=30)
-
-		deadline = time.time() + 18
-		while time.time() < deadline:
-			if 'acw_sc__v2' in _cookies_to_dict(page):
-				break
-			page.wait(0.6)
-
-		try:
-			user_agent = page.run_js('return navigator.userAgent;')
-		except Exception:
-			user_agent = default_user_agent()
-
-		cookies = _cookies_to_dict(page)
-		got = [n for n in WAF_COOKIE_NAMES if n in cookies]
-		logger.info(f'[{site["name"]}] 已获取 {len(cookies)} 个 cookies，其中 WAF cookies：{got or "无"}')
-
-		if not got:
-			logger.warning(f'[{site["name"]}] 未获取到常见 WAF cookies，后续请求会继续尝试')
-		return cookies, user_agent, True
-
-	except Exception as e:
-		logger.error(f'[{site["name"]}] 获取 WAF cookies 失败：{e}')
-		return {}, default_user_agent(), False
-
-	finally:
-		if page is not None:
-			try:
-				page.quit()
-			except Exception:
-				pass
+	key_match = re.search(r"['\"]([0-9]{40})['\"]", html)
+	key = key_match.group(1) if key_match else WAF_KEY_DEFAULT
+	return arg1, key
 
 
 def default_user_agent() -> str:
@@ -470,6 +423,57 @@ def default_user_agent() -> str:
 		'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 		'(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
 	)
+
+
+def fetch_waf_cookies(site: dict):
+	"""
+	纯 HTTP 访问站点登录页，若检测到阿里盾 WAF 挑战，纯 Python 秒解 acw_sc__v2。
+
+	Returns:
+		(cookies: dict, user_agent: str, ok: bool)
+	"""
+	try:
+		from curl_cffi import requests as cffi_requests
+	except ImportError:
+		logger.error('缺少依赖 curl_cffi，请在青龙「依赖管理 → Python」中安装 curl_cffi')
+		return {}, default_user_agent(), False
+
+	user_agent = default_user_agent()
+	logger.info(f'[{site["name"]}] 发起 HTTP 探测 WAF 状态 ...')
+
+	session = cffi_requests.Session(impersonate='chrome')
+	try:
+		resp = session.get(
+			site['login_url'],
+			headers={
+				'User-Agent': user_agent,
+				'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+				'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+			},
+			timeout=20,
+		)
+		cookies = dict(session.cookies.get_dict())
+		html = getattr(resp, 'text', '') or ''
+		arg1, key = extract_waf_challenge(html)
+
+		if arg1:
+			acw_sc_v2 = calc_acw_sc_v2(arg1, key)
+			if acw_sc_v2:
+				cookies['acw_sc__v2'] = acw_sc_v2
+				logger.info(f'[{site["name"]}] 探测到阿里云 WAF 挑战，纯 Python 解算 acw_sc__v2 成功')
+			else:
+				logger.warning(f'[{site["name"]}] 阿里 WAF 挑战解算失败（arg1 异常）')
+		else:
+			logger.info(f'[{site["name"]}] 页面未触发 WAF 挑战，直接进入后续流程')
+
+		got = [n for n in WAF_COOKIE_NAMES if n in cookies]
+		if got:
+			logger.info(f'[{site["name"]}] 已获取 WAF cookies：{got}')
+		return cookies, user_agent, True
+
+	except Exception as e:
+		logger.warning(f'[{site["name"]}] HTTP 探测 WAF 出现异常：{e}')
+		return {}, user_agent, False
 
 
 def prepare_site_runtime(site: dict):
@@ -487,7 +491,7 @@ def prepare_site_runtime(site: dict):
 
 def merge_account_cookies(account_cookies: dict, runtime_cookies: dict) -> dict:
 	"""
-	账号 cookie 保留登录态；本次浏览器获取的 WAF cookie 优先级更高。
+	账号 cookie 保留登录态；本次获取的 WAF cookie 优先级更高。
 	复制账号 cookie 时经常会带上旧 WAF 值，不能让它覆盖当前运行环境的新值。
 	"""
 	cookies = dict(account_cookies or {})
@@ -501,9 +505,8 @@ def merge_account_cookies(account_cookies: dict, runtime_cookies: dict) -> dict:
 			cookies[name] = runtime_cookies[name]
 
 	if replaced:
-		logger.info(f'已用本次浏览器获取的 WAF cookies 覆盖账号 cookie 中的旧值：{replaced}')
+		logger.info(f'已用本次获取的 WAF cookies 覆盖账号 cookie 中的旧值：{replaced}')
 	return cookies
-
 
 # --------------------------------------------------------------------------- #
 # 接口请求
@@ -557,8 +560,29 @@ def get_user_info(session, site: dict, cookies: dict, user_agent: str, api_user:
 		try:
 			data = resp.json()
 		except Exception:
-			logger.warning(f'[{site["name"]}] 获取用户信息响应不是 JSON：{response_summary(resp)}')
-			return None
+			html = getattr(resp, 'text', '') or ''
+			arg1, key = extract_waf_challenge(html)
+			if arg1:
+				logger.info(f'[{site["name"]}] 接口触发阿里 WAF 挑战，纯 Python 解算 acw_sc__v2 并重试 ...')
+				acw_sc_v2 = calc_acw_sc_v2(arg1, key)
+				if acw_sc_v2:
+					cookies['acw_sc__v2'] = acw_sc_v2
+					resp = session.get(
+						site['user_info_url'],
+						headers=_build_headers(site, user_agent, api_user, is_post=False),
+						cookies=cookies,
+						timeout=30,
+					)
+					try:
+						data = resp.json()
+					except Exception:
+						logger.warning(f'[{site["name"]}] 获取用户信息重试后仍非 JSON：{response_summary(resp)}')
+						return None
+				else:
+					return None
+			else:
+				logger.warning(f'[{site["name"]}] 获取用户信息响应不是 JSON：{response_summary(resp)}')
+				return None
 
 		if not data.get('success'):
 			logger.warning(f'[{site["name"]}] 获取用户信息失败：{data.get("message") or data.get("msg") or "接口返回失败"}')
@@ -572,7 +596,6 @@ def get_user_info(session, site: dict, cookies: dict, user_agent: str, api_user:
 	except Exception as e:
 		logger.warning(f'[{site["name"]}] 获取用户信息异常：{str(e)[:80]}')
 		return None
-
 
 _ALREADY_KEYWORDS = ('已签到', '已经签', '重复', 'already', 'signed', '今日已')
 
@@ -592,6 +615,31 @@ def do_checkin(session, site: dict, cookies: dict, user_agent: str, api_user: st
 		try:
 			data = resp.json()
 		except Exception:
+			html = getattr(resp, 'text', '') or ''
+			arg1, key = extract_waf_challenge(html)
+			if arg1:
+				logger.info(f'[{site["name"]}] 签到接口触发阿里 WAF 挑战，纯 Python 解算 acw_sc__v2 并重试 ...')
+				acw_sc_v2 = calc_acw_sc_v2(arg1, key)
+				if acw_sc_v2:
+					cookies['acw_sc__v2'] = acw_sc_v2
+					resp = session.post(
+						site['checkin_url'],
+						headers=_build_headers(site, user_agent, api_user, is_post=True),
+						cookies=cookies,
+						timeout=30,
+					)
+					try:
+						data = resp.json()
+					except Exception:
+						text = (resp.text or '').lower()
+						if 'success' in text:
+							return 'success', '签到成功'
+						if any(kw in text for kw in (k.lower() for k in _ALREADY_KEYWORDS)):
+							return 'already', resp.text[:80] or '今日已签到'
+						return 'failed', '重试后仍非有效 JSON'
+				else:
+					return 'failed', 'WAF 解算失败'
+
 			text = (resp.text or '').lower()
 			logger.warning(f'[{site["name"]}] 签到响应不是 JSON：{response_summary(resp)}')
 			if 'success' in text:
@@ -610,7 +658,6 @@ def do_checkin(session, site: dict, cookies: dict, user_agent: str, api_user: st
 
 	except Exception as e:
 		return 'failed', str(e)[:80]
-
 
 def empty_result(site: dict, account: dict, status='failed', error=None) -> dict:
 	return {
@@ -767,7 +814,7 @@ def main():
 		runtime = prepare_site_runtime(site)
 
 		if not runtime.get('ready'):
-			error = '无法获取 WAF cookies，且该站点 waf=true'
+			error = 'WAF 探测失败，且该站点配置了 waf=true'
 			logger.error(f'[{site["name"]}] {error}')
 			for account in site['accounts']:
 				results.append(empty_result(site, account, error=error))

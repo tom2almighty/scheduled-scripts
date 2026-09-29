@@ -4,18 +4,11 @@
 
 ## 依赖
 
-Python 依赖
 ```bash
-curl_cffi loguru DrissionPage playwright
+curl_cffi loguru
 ```
 
-Linux 依赖
-
-```bash
-chromium
-```
-
-确保青龙环境里有可用的 Chromium/Chrome。
+无须安装 Chromium 等任何 Linux 系统依赖。
 
 ## 青龙任务
 
@@ -72,6 +65,5 @@ chromium
 ## 可选环境变量
 
 - `NOTIFY_TRIGGERS`：通知条件，默认 `always`；可选 `always, never, success, failed, balance_changed`
-- `NEWAPI_BROWSER_PATH`：指定 Chromium/Chrome 路径
 - `NEWAPI_DATA_DIR`：余额记录目录，默认脚本同级目录
 - `TZ`：时区，默认 `Asia/Shanghai`
