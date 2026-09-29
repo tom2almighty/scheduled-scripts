@@ -8,46 +8,13 @@ new Env('NewAPI 自动签到');
 
 ----------------------------------------------------------------------------
 实现：多站点 + 多账号 + 签到 + 余额检查 + 余额变化检测 + 青龙通知
-依赖：curl_cffi loguru（纯 Python 实现，零浏览器依赖，内置阿里 WAF 算解）
-通知：直接复用青龙自带的 notify.py 的 send(title, content)
+依赖：curl_cffi loguru（纯 Python，零浏览器依赖，内置阿里 WAF 自动自愈）
+通知：复用青龙自带 notify.py 的 send(title, content)
 
-环境变量（在 青龙 > 环境变量 中配置）：
-
-  NEWAPI_SITES          多站点配置，JSON 数组，例如：
-      [
-        {
-          "name": "AnyRouter",
-          "base_url": "https://anyrouter.top",
-          "checkin_endpoint": "/api/user/sign_in",
-          "user_info_endpoint": "/api/user/self",
-          "waf": true,
-          "accounts": [
-            {"name": "主号", "cookie": "session=xxx", "api_user": "12345"}
-          ]
-        },
-        {
-          "name": "新站点",
-          "base_url": "https://example.com",
-          "checkin_endpoint": "/api/user/checkin",
-          "waf": "auto",
-          "accounts": [
-            {"name": "账号A", "cookie": "session=yyy"}
-          ]
-        }
-      ]
-
-      · base_url 必填，脚本会自动去掉末尾 /
-      · checkin_endpoint 默认 /api/user/checkin
-      · user_info_endpoint 默认 /api/user/self
-      · login_path 默认 /login，仅 waf 为 true/auto 时使用
-      · console_path 默认 /console，用于 Referer
-      · waf 可选 true / false / "auto"，默认 "auto"
-      · account.cookie 支持 "k=v; k2=v2" 字符串，也支持 {"session":"xxx"} 对象
-      · account.api_user 可选；存在时会写入请求头 new-api-user
-
+环境变量：
+  NEWAPI_SITES          多站点配置，JSON 格式，支持 Access Token 或 Cookie
   NOTIFY_TRIGGERS       通知触发条件，逗号分隔，默认 always
-      可选值：always / never / success / failed / balance_changed
-
+                        可选值：always / never / success / failed / balance_changed
   NEWAPI_DATA_DIR       余额记录文件存放目录，默认脚本同级目录
   TZ                    时区，默认 Asia/Shanghai
 ----------------------------------------------------------------------------
@@ -63,7 +30,6 @@ from datetime import datetime
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-
 # --------------------------------------------------------------------------- #
 # 日志（loguru）
 # --------------------------------------------------------------------------- #
@@ -73,36 +39,40 @@ try:
 	logger.remove()
 	logger.add(
 		sys.stdout,
-		colorize=False,
 		level='INFO',
-		format='{time:HH:mm:ss} | {level: <7} | {message}',
+		format='<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>',
 	)
 except ImportError:
 	class _Fallback:
-		def _log(self, level, msg):
-			print(f'{datetime.now():%H:%M:%S} | {level:<7} | {msg}')
+		def info(self, msg, *a, **k):
+			print(f'[INFO] {msg}')
 
-		info = lambda self, m: self._log('INFO', m)
-		success = lambda self, m: self._log('SUCCESS', m)
-		warning = lambda self, m: self._log('WARNING', m)
-		error = lambda self, m: self._log('ERROR', m)
+		def success(self, msg, *a, **k):
+			print(f'[SUCCESS] {msg}')
+
+		def warning(self, msg, *a, **k):
+			print(f'[WARNING] {msg}')
+
+		def error(self, msg, *a, **k):
+			print(f'[ERROR] {msg}')
 
 	logger = _Fallback()
 
 
 # --------------------------------------------------------------------------- #
-# 青龙通知：复用面板自带的 notify.py
+# 青龙通知
 # --------------------------------------------------------------------------- #
 def _load_ql_send():
-	"""加载青龙的 notify.send，找不到则返回 None。"""
+	"""加载青龙 notify.py 的 send，找不到则返回 None。"""
 	try:
-		from notify import send  # type: ignore
+		from notify import send
+
 		return send
 	except Exception:
 		pass
 
 	candidates = [
-		os.environ.get('QL_DIR', '') and os.path.join(os.environ['QL_DIR'], 'scripts'),
+		os.getenv('QL_DIR', '') and os.path.join(os.getenv('QL_DIR', ''), 'scripts'),
 		'/ql/data/scripts',
 		'/ql/scripts',
 		os.path.dirname(os.path.abspath(__file__)),
@@ -111,11 +81,11 @@ def _load_ql_send():
 		if path and os.path.isfile(os.path.join(path, 'notify.py')) and path not in sys.path:
 			sys.path.append(path)
 			try:
-				from notify import send  # type: ignore
+				from notify import send
+
 				return send
 			except Exception:
 				continue
-
 	return None
 
 
@@ -124,17 +94,15 @@ QL_SEND = _load_ql_send()
 
 def notify(title: str, content: str):
 	"""发送通知：优先走青龙 notify.send，否则仅打印到日志。"""
-	if QL_SEND is None:
-		logger.warning('未找到青龙通知模块 notify.py，以下为通知内容（仅打印）：')
-		logger.info(f'\n【{title}】\n{content}')
-		return
+	if QL_SEND:
+		try:
+			QL_SEND(title, content)
+			logger.info('已触发青龙通知推送')
+			return
+		except Exception as e:
+			logger.warning(f'青龙通知推送失败：{e}，回退到日志输出')
 
-	try:
-		QL_SEND(title, content)
-		logger.success('通知已发送')
-	except Exception as e:
-		logger.error(f'通知发送失败：{e}')
-		logger.info(f'\n【{title}】\n{content}')
+	logger.info(f'\n【{title}】\n{content}')
 
 
 # --------------------------------------------------------------------------- #
@@ -142,16 +110,51 @@ def notify(title: str, content: str):
 # --------------------------------------------------------------------------- #
 QUOTA_PER_DOLLAR = 500000
 DEFAULT_CHECKIN_ENDPOINT = '/api/user/checkin'
+FALLBACK_CHECKIN_ENDPOINT = '/api/user/sign_in'
 DEFAULT_USER_INFO_ENDPOINT = '/api/user/self'
-DEFAULT_LOGIN_PATH = '/login'
-DEFAULT_CONSOLE_PATH = '/console'
 
 DATA_DIR = os.getenv('NEWAPI_DATA_DIR') or os.path.dirname(os.path.abspath(__file__))
 BALANCE_FILE = os.path.join(DATA_DIR, 'newapi_balance.json')
 
-WAF_COOKIE_NAMES = ('acw_tc', 'cdn_sec_tc', 'acw_sc__v2')
-WAF_MODES = {'true', 'false', 'auto'}
-RESPONSE_LOG_LIMIT = 180
+_ALREADY_KEYWORDS = ('已签到', '已经签', '重复', 'already', 'signed', '今日已')
+WAF_KEY_DEFAULT = '3000176000856006061501533003690027800375'
+WAF_MASK = (
+	15, 35, 29, 24, 33, 16, 1, 38, 10, 9, 19, 31, 40, 27, 22, 23, 25, 13,
+	6, 11, 39, 18, 20, 8, 14, 21, 32, 26, 2, 30, 7, 4, 17, 5, 3, 28, 34,
+	37, 12, 36,
+)
+
+
+# --------------------------------------------------------------------------- #
+# 阿里 WAF 纯算法秒解
+# --------------------------------------------------------------------------- #
+def calc_acw_sc_v2(arg1: str, key: str = WAF_KEY_DEFAULT) -> str:
+	"""纯 Python 算解阿里云盾 acw_sc__v2 cookie。"""
+	if not arg1 or len(arg1) < len(WAF_MASK):
+		return ''
+	unsboxed = ''.join(arg1[pos - 1] for pos in WAF_MASK)
+	res = []
+	for i in range(0, min(len(unsboxed), len(key)), 2):
+		v1 = int(unsboxed[i:i + 2], 16)
+		v2 = int(key[i:i + 2], 16)
+		res.append(f'{v1 ^ v2:02x}')
+	return ''.join(res)
+
+
+def extract_waf_challenge(html: str):
+	"""从响应 HTML 中提取阿里 WAF 的 arg1 与 key。"""
+	if not html or ('acw_sc__v2' not in html and 'arg1' not in html):
+		return None, None
+	match = re.search(r"(?:var\s+)?arg1\s*=\s*['\"]([0-9a-fA-F]{40})['\"]", html)
+	if not match:
+		match = re.search(r"arg1\s*=\s*['\"]([0-9a-fA-F]+)['\"]", html)
+	if not match:
+		return None, None
+	arg1 = match.group(1)
+
+	key_match = re.search(r"['\"]([0-9]{40})['\"]", html)
+	key = key_match.group(1) if key_match else WAF_KEY_DEFAULT
+	return arg1, key
 
 
 # --------------------------------------------------------------------------- #
@@ -165,12 +168,8 @@ def normalize_base_url(value: str) -> str:
 	base_url = _strip(value).rstrip('/')
 	if not base_url:
 		return ''
-
-	parsed = urlparse(base_url)
-	if not parsed.scheme or not parsed.netloc:
-		logger.warning(f'站点地址无效：{base_url}')
-		return ''
-
+	if not (base_url.startswith('http://') or base_url.startswith('https://')):
+		base_url = f'https://{base_url}'
 	return base_url
 
 
@@ -187,23 +186,12 @@ def build_url(base_url: str, path: str) -> str:
 	return f'{base_url}{normalize_path(path, "/")}'
 
 
-def normalize_waf_mode(value) -> str:
-	if isinstance(value, bool):
-		return 'true' if value else 'false'
-
-	mode = _strip(value).lower() or 'auto'
-	if mode not in WAF_MODES:
-		logger.warning(f'waf 配置值无效：{value}，已按 auto 处理')
-		return 'auto'
-	return mode
-
-
 def site_host(base_url: str) -> str:
 	return urlparse(base_url).netloc or base_url
 
 
 def parse_cookies(cookies_data) -> dict:
-	"""把 cookie 配置解析成 dict，支持对象与 'k=v; k2=v2' 字符串两种格式。"""
+	"""将 cookie 配置解析为 dict，支持对象与 'k=v; k2=v2' 字符串。"""
 	if isinstance(cookies_data, dict):
 		return {str(k).strip(): str(v).strip() for k, v in cookies_data.items() if str(k).strip()}
 
@@ -228,21 +216,21 @@ def _normalize_account(raw: dict, site_name: str, site_index: int, account_index
 		return None
 
 	name = _strip(raw.get('name')) or f'账号{account_index + 1}'
-	cookie = raw.get('cookie')
-	if cookie is None:
-		logger.warning(f'[{site_name}/{name}] 跳过账号：缺少 cookie')
+	token = _strip(raw.get('token'))
+	raw_cookie = raw.get('cookie')
+	cookies = parse_cookies(raw_cookie) if raw_cookie else {}
+
+	if not token and not cookies:
+		logger.warning(f'[{site_name}/{name}] 跳过账号：缺少 token 或 cookie')
 		return None
 
-	cookies = parse_cookies(cookie)
-	if not cookies:
-		logger.warning(f'[{site_name}/{name}] 跳过账号：cookie 配置无效')
-		return None
-
+	ident = token or json.dumps(cookies, sort_keys=True)
 	return {
 		'name': name,
-		'api_user': _strip(raw.get('api_user')),
+		'token': token,
 		'cookies': cookies,
-		'cookie_hash': hashlib.sha256(json.dumps(cookies, sort_keys=True).encode('utf-8')).hexdigest(),
+		'api_user': _strip(raw.get('api_user')),
+		'ident_hash': hashlib.sha256(ident.encode('utf-8')).hexdigest(),
 		'index': account_index,
 		'site_index': site_index,
 	}
@@ -259,11 +247,9 @@ def _normalize_site(raw: dict, index: int):
 		return None
 
 	name = _strip(raw.get('name')) or site_host(base_url)
-	checkin_endpoint = normalize_path(raw.get('checkin_endpoint'), DEFAULT_CHECKIN_ENDPOINT)
+	raw_checkin = _strip(raw.get('checkin_endpoint'))
+	checkin_endpoint = normalize_path(raw_checkin, DEFAULT_CHECKIN_ENDPOINT)
 	user_info_endpoint = normalize_path(raw.get('user_info_endpoint'), DEFAULT_USER_INFO_ENDPOINT)
-	login_path = normalize_path(raw.get('login_path'), DEFAULT_LOGIN_PATH)
-	console_path = normalize_path(raw.get('console_path'), DEFAULT_CONSOLE_PATH)
-	waf = normalize_waf_mode(raw.get('waf', 'auto'))
 
 	raw_accounts = raw.get('accounts')
 	if not isinstance(raw_accounts, list) or not raw_accounts:
@@ -280,7 +266,7 @@ def _normalize_site(raw: dict, index: int):
 		dedup_key = (
 			normalized['name'],
 			normalized['api_user'],
-			normalized['cookie_hash'],
+			normalized['ident_hash'],
 		)
 		if dedup_key in seen:
 			continue
@@ -297,9 +283,7 @@ def _normalize_site(raw: dict, index: int):
 		'host': site_host(base_url),
 		'checkin_url': build_url(base_url, checkin_endpoint),
 		'user_info_url': build_url(base_url, user_info_endpoint),
-		'login_url': build_url(base_url, login_path),
-		'console_url': build_url(base_url, console_path),
-		'waf': waf,
+		'custom_checkin': bool(raw_checkin),
 		'accounts': accounts,
 		'index': index,
 	}
@@ -311,7 +295,7 @@ def load_sites() -> list:
 		logger.error('未找到 NEWAPI_SITES 环境变量')
 		logger.info(
 			'示例：NEWAPI_SITES = '
-			'[{"name":"新站点","base_url":"https://example.com","accounts":[{"name":"主号","cookie":"session=xxx"}]}]'
+			'[{"name":"新站点","base_url":"https://example.com","accounts":[{"name":"主号","token":"sk-xxx"}]}]'
 		)
 		return []
 
@@ -348,7 +332,7 @@ def load_sites() -> list:
 # 余额记录（检测余额是否变化）
 # --------------------------------------------------------------------------- #
 def account_key(site: dict, account: dict) -> str:
-	identity = account.get('api_user') or f'{account.get("name", "")}#{account.get("index", 0)}'
+	identity = account.get('api_user') or account.get('token') or f'{account["name"]}#{account["index"]}'
 	raw = f'{site["base_url"]}|{identity}'
 	return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
@@ -358,20 +342,21 @@ def balance_hash(quota, used) -> str:
 
 
 def load_balance_record():
-	"""读取上次的余额哈希记录，首次运行返回 None。"""
+	"""读取上次的余额记录，首次运行返回 None。"""
+	if not os.path.isfile(BALANCE_FILE):
+		return None
 	try:
-		if os.path.isfile(BALANCE_FILE):
-			with open(BALANCE_FILE, 'r', encoding='utf-8') as f:
-				content = f.read().strip()
-				return json.loads(content) if content else None
+		with open(BALANCE_FILE, 'r', encoding='utf-8') as f:
+			data = json.load(f)
+		return data if isinstance(data, dict) else None
 	except Exception as e:
 		logger.warning(f'读取余额记录失败：{e}')
-	return None
+		return None
 
 
 def save_balance_record(record: dict):
 	try:
-		os.makedirs(os.path.dirname(BALANCE_FILE) or '.', exist_ok=True)
+		os.makedirs(os.path.dirname(os.path.abspath(BALANCE_FILE)), exist_ok=True)
 		with open(BALANCE_FILE, 'w', encoding='utf-8') as f:
 			json.dump(record, f, ensure_ascii=False, indent=2)
 	except Exception as e:
@@ -379,45 +364,8 @@ def save_balance_record(record: dict):
 
 
 # --------------------------------------------------------------------------- #
-# WAF cookies
+# 网络请求与 WAF 自愈重试
 # --------------------------------------------------------------------------- #
-WAF_KEY_DEFAULT = '3000176000856006061501533003690027800375'
-WAF_MASK = (
-	15, 35, 29, 24, 33, 16, 1, 38, 10, 9, 19, 31, 40, 27, 22, 23, 25, 13,
-	6, 11, 39, 18, 20, 8, 14, 21, 32, 26, 2, 30, 7, 4, 17, 5, 3, 28, 34,
-	37, 12, 36,
-)
-
-
-def calc_acw_sc_v2(arg1: str, key: str = WAF_KEY_DEFAULT) -> str:
-	"""纯 Python 算解阿里云盾 acw_sc__v2 cookie。"""
-	if not arg1 or len(arg1) < len(WAF_MASK):
-		return ''
-	unsboxed = ''.join(arg1[pos - 1] for pos in WAF_MASK)
-	res = []
-	for i in range(0, min(len(unsboxed), len(key)), 2):
-		v1 = int(unsboxed[i:i + 2], 16)
-		v2 = int(key[i:i + 2], 16)
-		res.append(f'{v1 ^ v2:02x}')
-	return ''.join(res)
-
-
-def extract_waf_challenge(html: str):
-	"""从响应 HTML 中提取阿里 WAF 的 arg1 与 key。"""
-	if not html or ('acw_sc__v2' not in html and 'arg1' not in html):
-		return None, None
-	match = re.search(r"(?:var\s+)?arg1\s*=\s*['\"]([0-9a-fA-F]{40})['\"]", html)
-	if not match:
-		match = re.search(r"arg1\s*=\s*['\"]([0-9a-fA-F]+)['\"]", html)
-	if not match:
-		return None, None
-	arg1 = match.group(1)
-
-	key_match = re.search(r"['\"]([0-9]{40})['\"]", html)
-	key = key_match.group(1) if key_match else WAF_KEY_DEFAULT
-	return arg1, key
-
-
 def default_user_agent() -> str:
 	return (
 		'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -425,110 +373,9 @@ def default_user_agent() -> str:
 	)
 
 
-def fetch_waf_cookies(site: dict):
-	"""
-	纯 HTTP 访问站点登录页，若检测到阿里盾 WAF 挑战，纯 Python 秒解 acw_sc__v2。
-
-	Returns:
-		(cookies: dict, user_agent: str, ok: bool)
-	"""
-	try:
-		from curl_cffi import requests as cffi_requests
-	except ImportError:
-		logger.error('缺少依赖 curl_cffi，请在青龙「依赖管理 → Python」中安装 curl_cffi')
-		return {}, default_user_agent(), False
-
-	user_agent = default_user_agent()
-	logger.info(f'[{site["name"]}] 发起 HTTP 探测 WAF 状态 ...')
-
-	session = cffi_requests.Session(impersonate='chrome')
-	try:
-		resp = session.get(
-			site['login_url'],
-			headers={
-				'User-Agent': user_agent,
-				'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-				'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-			},
-			timeout=20,
-		)
-		cookies = dict(session.cookies.get_dict())
-		html = getattr(resp, 'text', '') or ''
-		arg1, key = extract_waf_challenge(html)
-
-		if arg1:
-			acw_sc_v2 = calc_acw_sc_v2(arg1, key)
-			if acw_sc_v2:
-				cookies['acw_sc__v2'] = acw_sc_v2
-				logger.info(f'[{site["name"]}] 探测到阿里云 WAF 挑战，纯 Python 解算 acw_sc__v2 成功')
-			else:
-				logger.warning(f'[{site["name"]}] 阿里 WAF 挑战解算失败（arg1 异常）')
-		else:
-			logger.info(f'[{site["name"]}] 页面未触发 WAF 挑战，直接进入后续流程')
-
-		got = [n for n in WAF_COOKIE_NAMES if n in cookies]
-		if got:
-			logger.info(f'[{site["name"]}] 已获取 WAF cookies：{got}')
-		return cookies, user_agent, True
-
-	except Exception as e:
-		logger.warning(f'[{site["name"]}] HTTP 探测 WAF 出现异常：{e}')
-		return {}, user_agent, False
-
-
-def prepare_site_runtime(site: dict):
-	mode = site['waf']
-	if mode == 'false':
-		logger.info(f'[{site["name"]}] 已关闭 WAF cookie 获取')
-		return {'cookies': {}, 'user_agent': default_user_agent(), 'ready': True}
-
-	cookies, user_agent, ok = fetch_waf_cookies(site)
-	if ok or mode == 'auto':
-		return {'cookies': cookies, 'user_agent': user_agent, 'ready': True}
-
-	return {'cookies': {}, 'user_agent': user_agent, 'ready': False}
-
-
-def merge_account_cookies(account_cookies: dict, runtime_cookies: dict) -> dict:
-	"""
-	账号 cookie 保留登录态；本次获取的 WAF cookie 优先级更高。
-	复制账号 cookie 时经常会带上旧 WAF 值，不能让它覆盖当前运行环境的新值。
-	"""
-	cookies = dict(account_cookies or {})
-	runtime_cookies = runtime_cookies or {}
-	replaced = []
-
-	for name in WAF_COOKIE_NAMES:
-		if name in runtime_cookies:
-			if cookies.get(name) and cookies.get(name) != runtime_cookies[name]:
-				replaced.append(name)
-			cookies[name] = runtime_cookies[name]
-
-	if replaced:
-		logger.info(f'已用本次获取的 WAF cookies 覆盖账号 cookie 中的旧值：{replaced}')
-	return cookies
-
-# --------------------------------------------------------------------------- #
-# 接口请求
-# --------------------------------------------------------------------------- #
-def response_summary(resp) -> str:
-	content_type = ''
-	try:
-		content_type = resp.headers.get('content-type', '')
-	except Exception:
-		pass
-
-	text = (getattr(resp, 'text', '') or '').replace('\n', ' ').replace('\r', ' ').strip()
-	if len(text) > RESPONSE_LOG_LIMIT:
-		text = text[:RESPONSE_LOG_LIMIT] + '...'
-	return f'HTTP {getattr(resp, "status_code", "未知")}，content-type={content_type or "未知"}，body={text or "空"}'
-
-
-def _build_headers(site: dict, user_agent: str, api_user: str, is_post: bool) -> dict:
+def _build_headers(account: dict, is_post: bool = False) -> dict:
 	headers = {
-		'User-Agent': user_agent,
-		'Referer': site['console_url'],
-		'Origin': site['base_url'],
+		'User-Agent': default_user_agent(),
 		'Accept': 'application/json, text/plain, */*',
 		'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 		'Connection': 'keep-alive',
@@ -536,128 +383,129 @@ def _build_headers(site: dict, user_agent: str, api_user: str, is_post: bool) ->
 		'Sec-Fetch-Mode': 'cors',
 		'Sec-Fetch-Site': 'same-origin',
 	}
+	token = account.get('token')
+	if token:
+		headers['Authorization'] = f'Bearer {token}'
+	api_user = account.get('api_user')
 	if api_user:
-		headers['new-api-user'] = str(api_user)
+		headers['New-Api-User'] = str(api_user)
 	if is_post:
 		headers['Content-Type'] = 'application/json'
 		headers['X-Requested-With'] = 'XMLHttpRequest'
 	return headers
 
 
-def get_user_info(session, site: dict, cookies: dict, user_agent: str, api_user: str):
-	"""查询账号余额，返回 {'quota','used'} 或 None。"""
+def request_with_waf_retry(session, method: str, url: str, headers: dict, cookies: dict, json_data=None):
+	"""发送 HTTP 请求，若触发阿里 WAF 挑战则纯 Python 自动解算并重试一次。"""
+	kwargs = {
+		'headers': headers,
+		'cookies': cookies,
+		'timeout': 30,
+	}
+	if json_data is not None:
+		kwargs['json'] = json_data
+
 	try:
-		resp = session.get(
-			site['user_info_url'],
-			headers=_build_headers(site, user_agent, api_user, is_post=False),
-			cookies=cookies,
-			timeout=30,
-		)
-		if resp.status_code != 200:
-			logger.warning(f'[{site["name"]}] 获取用户信息失败：HTTP {resp.status_code}')
-			return None
-
-		try:
-			data = resp.json()
-		except Exception:
-			html = getattr(resp, 'text', '') or ''
-			arg1, key = extract_waf_challenge(html)
-			if arg1:
-				logger.info(f'[{site["name"]}] 接口触发阿里 WAF 挑战，纯 Python 解算 acw_sc__v2 并重试 ...')
-				acw_sc_v2 = calc_acw_sc_v2(arg1, key)
-				if acw_sc_v2:
-					cookies['acw_sc__v2'] = acw_sc_v2
-					resp = session.get(
-						site['user_info_url'],
-						headers=_build_headers(site, user_agent, api_user, is_post=False),
-						cookies=cookies,
-						timeout=30,
-					)
-					try:
-						data = resp.json()
-					except Exception:
-						logger.warning(f'[{site["name"]}] 获取用户信息重试后仍非 JSON：{response_summary(resp)}')
-						return None
-				else:
-					return None
-			else:
-				logger.warning(f'[{site["name"]}] 获取用户信息响应不是 JSON：{response_summary(resp)}')
-				return None
-
-		if not data.get('success'):
-			logger.warning(f'[{site["name"]}] 获取用户信息失败：{data.get("message") or data.get("msg") or "接口返回失败"}')
-			return None
-
-		user = data.get('data') or {}
-		return {
-			'quota': round(float(user.get('quota', 0) or 0) / QUOTA_PER_DOLLAR, 2),
-			'used': round(float(user.get('used_quota', 0) or 0) / QUOTA_PER_DOLLAR, 2),
-		}
+		resp = session.request(method, url, **kwargs)
 	except Exception as e:
-		logger.warning(f'[{site["name"]}] 获取用户信息异常：{str(e)[:80]}')
+		return None, str(e)
+
+	# 检查是否返回了阿里 WAF 拦截页面
+	html = getattr(resp, 'text', '') or ''
+	arg1, key = extract_waf_challenge(html)
+	if arg1:
+		acw_sc_v2 = calc_acw_sc_v2(arg1, key)
+		if acw_sc_v2:
+			cookies['acw_sc__v2'] = acw_sc_v2
+			if hasattr(resp, 'cookies') and resp.cookies:
+				for k, v in resp.cookies.items():
+					cookies[k] = v
+			kwargs['cookies'] = cookies
+			try:
+				resp = session.request(method, url, **kwargs)
+			except Exception as e:
+				return None, str(e)
+
+	return resp, None
+
+
+def get_user_info(session, site: dict, account: dict, cookies: dict):
+	"""查询账号余额，返回 {'quota', 'used'} 或 None。"""
+	headers = _build_headers(account, is_post=False)
+	resp, err = request_with_waf_retry(session, 'GET', site['user_info_url'], headers, cookies)
+	if err or resp is None:
+		logger.warning(f'[{site["name"]}/{account["name"]}] 获取用户信息网络异常：{err}')
 		return None
 
-_ALREADY_KEYWORDS = ('已签到', '已经签', '重复', 'already', 'signed', '今日已')
+	if resp.status_code != 200:
+		logger.warning(f'[{site["name"]}/{account["name"]}] 获取用户信息失败：HTTP {resp.status_code}')
+		return None
 
-
-def do_checkin(session, site: dict, cookies: dict, user_agent: str, api_user: str):
-	"""执行签到，返回 (status, message)；status ∈ {'success','already','failed'}。"""
 	try:
-		resp = session.post(
-			site['checkin_url'],
-			headers=_build_headers(site, user_agent, api_user, is_post=True),
-			cookies=cookies,
-			timeout=30,
-		)
-		if resp.status_code != 200:
-			return 'failed', f'HTTP {resp.status_code}'
+		data = resp.json()
+	except Exception:
+		logger.warning(f'[{site["name"]}/{account["name"]}] 用户信息响应非 JSON')
+		return None
 
-		try:
-			data = resp.json()
-		except Exception:
-			html = getattr(resp, 'text', '') or ''
-			arg1, key = extract_waf_challenge(html)
-			if arg1:
-				logger.info(f'[{site["name"]}] 签到接口触发阿里 WAF 挑战，纯 Python 解算 acw_sc__v2 并重试 ...')
-				acw_sc_v2 = calc_acw_sc_v2(arg1, key)
-				if acw_sc_v2:
-					cookies['acw_sc__v2'] = acw_sc_v2
-					resp = session.post(
-						site['checkin_url'],
-						headers=_build_headers(site, user_agent, api_user, is_post=True),
-						cookies=cookies,
-						timeout=30,
-					)
-					try:
-						data = resp.json()
-					except Exception:
-						text = (resp.text or '').lower()
-						if 'success' in text:
-							return 'success', '签到成功'
-						if any(kw in text for kw in (k.lower() for k in _ALREADY_KEYWORDS)):
-							return 'already', resp.text[:80] or '今日已签到'
-						return 'failed', '重试后仍非有效 JSON'
-				else:
-					return 'failed', 'WAF 解算失败'
+	if not (data.get('success') or data.get('ret') == 1 or data.get('code') == 0):
+		msg = data.get('message') or data.get('msg') or '接口返回失败'
+		logger.warning(f'[{site["name"]}/{account["name"]}] 获取用户信息失败：{msg}')
+		return None
 
-			text = (resp.text or '').lower()
-			logger.warning(f'[{site["name"]}] 签到响应不是 JSON：{response_summary(resp)}')
-			if 'success' in text:
-				return 'success', '签到成功'
-			if any(kw in text for kw in (k.lower() for k in _ALREADY_KEYWORDS)):
-				return 'already', resp.text[:80] or '今日已签到'
-			return 'failed', '无效响应格式'
+	user = data.get('data') or {}
+	return {
+		'quota': round(float(user.get('quota', 0) or 0) / QUOTA_PER_DOLLAR, 2),
+		'used': round(float(user.get('used_quota', 0) or 0) / QUOTA_PER_DOLLAR, 2),
+	}
 
-		if data.get('ret') == 1 or data.get('code') == 0 or data.get('success'):
-			return 'success', str(data.get('msg') or data.get('message') or '签到成功')
 
-		msg = str(data.get('msg') or data.get('message') or data.get('error') or '未知错误')
-		if any(kw in msg.lower() for kw in (k.lower() for k in _ALREADY_KEYWORDS)):
-			return 'already', msg
-		return 'failed', msg
+def do_checkin(session, site: dict, account: dict, cookies: dict):
+	"""执行签到，优先使用配置/默认端点，遇到 404 自适应 fallback 到旧版接口。"""
+	endpoint = site['checkin_url']
+	headers = _build_headers(account, is_post=True)
 
-	except Exception as e:
-		return 'failed', str(e)[:80]
+	resp, err = request_with_waf_retry(session, 'POST', endpoint, headers, cookies, json_data={})
+	if err or resp is None:
+		return 'failed', f'网络异常：{err}'
+
+	# 若默认端点 404 且未手动自定义，自适应回退到 /api/user/sign_in
+	if resp.status_code == 404 and not site.get('custom_checkin'):
+		fallback_url = build_url(site['base_url'], FALLBACK_CHECKIN_ENDPOINT)
+		resp_fb, err_fb = request_with_waf_retry(session, 'POST', fallback_url, headers, cookies, json_data={})
+		if not err_fb and resp_fb and resp_fb.status_code != 404:
+			resp = resp_fb
+
+	if resp.status_code != 200:
+		return 'failed', f'HTTP {resp.status_code}'
+
+	try:
+		data = resp.json()
+	except Exception:
+		text = (resp.text or '').lower()
+		if 'success' in text:
+			return 'success', '签到成功'
+		if any(kw in text for kw in _ALREADY_KEYWORDS):
+			return 'already', (resp.text or '')[:80].strip() or '今日已签到'
+		return 'failed', '响应非有效 JSON 格式'
+
+	msg = str(data.get('message') or data.get('msg') or data.get('error') or '')
+	is_success = bool(data.get('success') or data.get('ret') == 1 or data.get('code') == 0)
+
+	if is_success:
+		# 新版 NewAPI 官方返回格式包含 data: { quota_awarded: 500000, checkin_date: '...' }
+		res_data = data.get('data')
+		extra = ''
+		if isinstance(res_data, dict) and 'quota_awarded' in res_data:
+			awarded = res_data.get('quota_awarded', 0)
+			dollars = round(float(awarded) / QUOTA_PER_DOLLAR, 2)
+			extra = f'（获得 ${dollars}）'
+		return 'success', f'{msg or "签到成功"}{extra}'
+
+	if any(kw in msg.lower() for kw in _ALREADY_KEYWORDS):
+		return 'already', msg or '今日已签到'
+
+	return 'failed', msg or '签到失败'
+
 
 def empty_result(site: dict, account: dict, status='failed', error=None) -> dict:
 	return {
@@ -675,28 +523,28 @@ def empty_result(site: dict, account: dict, status='failed', error=None) -> dict
 	}
 
 
-def check_in_account(site: dict, account: dict, runtime: dict) -> dict:
-	"""处理单个账号：查余额 + 签到，返回结构化结果。"""
-	from curl_cffi import requests as cffi_requests
+def check_in_account(site: dict, account: dict) -> dict:
+	"""单个账号：查余额 + 签到。"""
+	try:
+		from curl_cffi import requests as cffi_requests
+	except ImportError:
+		logger.error('缺少依赖 curl_cffi，请在青龙「依赖管理 → Python」中安装 curl_cffi')
+		return empty_result(site, account, error='缺少依赖 curl_cffi')
 
 	result = empty_result(site, account)
 	name = account['name']
-	api_user = account.get('api_user', '')
-
 	logger.info(f'==== 开始处理 [{site["name"]}/{name}] ====')
 
-	cookies = merge_account_cookies(account['cookies'], runtime.get('cookies') or {})
-	user_agent = runtime.get('user_agent') or default_user_agent()
-
+	cookies = dict(account['cookies'])
 	session = cffi_requests.Session(impersonate='chrome')
 	try:
-		info = get_user_info(session, site, cookies, user_agent, api_user)
+		info = get_user_info(session, site, account, cookies)
 		if info:
 			result['quota'] = info['quota']
 			result['used'] = info['used']
 			logger.info(f'[{site["name"]}/{name}] 当前余额：${info["quota"]}（已用 ${info["used"]}）')
 
-		status, message = do_checkin(session, site, cookies, user_agent, api_user)
+		status, message = do_checkin(session, site, account, cookies)
 		result['status'] = status
 		result['message'] = message
 		if status == 'success':
@@ -716,14 +564,13 @@ def check_in_account(site: dict, account: dict, runtime: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 通知触发判断
+# 通知与主流程
 # --------------------------------------------------------------------------- #
 def parse_triggers() -> set:
 	raw = os.getenv('NOTIFY_TRIGGERS', '').strip().lower()
 	if not raw:
 		return {'always'}
-	valid = {'always', 'never', 'success', 'failed', 'balance_changed'}
-	triggers = {t.strip() for t in raw.split(',') if t.strip() in valid}
+	triggers = {t.strip() for t in raw.split(',') if t.strip()}
 	return triggers or {'always'}
 
 
@@ -732,67 +579,54 @@ def should_notify(triggers, has_success, has_failed, has_balance_changed, is_fir
 		return False
 	if 'always' in triggers:
 		return True
-	if 'balance_changed' in triggers and (is_first_run or has_balance_changed):
+	if 'success' in triggers and has_success:
 		return True
 	if 'failed' in triggers and has_failed:
 		return True
-	if 'success' in triggers and has_success:
+	if 'balance_changed' in triggers and (has_balance_changed or is_first_run):
 		return True
 	return False
 
 
-# --------------------------------------------------------------------------- #
-# 通知内容拼装
-# --------------------------------------------------------------------------- #
 def build_notification(results: list, timestamp: str):
 	total = len(results)
-	ok = [r for r in results if r['status'] in ('success', 'already')]
-	failed = [r for r in results if r['status'] == 'failed']
-	success_count = len(ok)
+	success_count = sum(1 for r in results if r['status'] in ('success', 'already'))
+	failed_count = total - success_count
 
-	if not failed:
-		head = f'✅ 全部签到成功 ({success_count}/{total})'
-	elif ok:
-		head = f'⚠️ 部分签到成功 ({success_count}/{total})'
-	else:
-		head = f'❌ 全部签到失败 (0/{total})'
+	status_icon = '✅' if failed_count == 0 else ('⚠️' if success_count > 0 else '❌')
+	title = f'NewAPI 签到 {status_icon} 成功 {success_count}/{total}'
 
-	title = f'NewAPI 签到 {head}'
-	lines = [head, f'🕐 {timestamp}', '']
+	lines = [
+		f'时间：{timestamp}',
+		f'统计：共 {total} 个账号，成功 {success_count}，失败 {failed_count}',
+		'',
+		'── 详细结果 ──',
+	]
 
-	current_site = None
 	for r in results:
 		site_label = f'{r["site_name"]} ({r["host"]})'
-		if site_label != current_site:
-			if current_site is not None:
-				lines.append('')
-			lines.append(f'【{site_label}】')
-			current_site = site_label
+		user_label = r['name']
+		if r.get('api_user'):
+			user_label += f' [ID: {r["api_user"]}]'
 
-		if r['status'] == 'success':
-			icon = '✅'
-		elif r['status'] == 'already':
-			icon = '☑️'
-		else:
-			icon = '❌'
-
-		lines.append(f'{icon} {r["name"]}')
+		icon = '✅' if r['status'] == 'success' else ('ℹ️' if r['status'] == 'already' else '❌')
+		lines.append(f'{icon} 【{site_label}】{user_label}')
 
 		if r['status'] == 'failed':
-			lines.append(f'    错误：{r["error"]}')
+			reason = r.get('error') or r.get('message') or '未知错误'
+			lines.append(f'    失败原因：{reason}')
 		else:
 			if r['quota'] is not None:
 				mark = '  🔔余额有变化' if r['balance_changed'] is True else ''
 				lines.append(f'    余额：${r["quota"]}（已用 ${r["used"]}）{mark}')
 			if r['status'] == 'already':
 				lines.append(f'    {r["message"]}')
+			elif r['status'] == 'success' and r.get('message'):
+				lines.append(f'    {r["message"]}')
 
 	return title, '\n'.join(lines).strip()
 
 
-# --------------------------------------------------------------------------- #
-# 主流程
-# --------------------------------------------------------------------------- #
 def main():
 	logger.info('NewAPI 自动签到脚本启动（青龙版）')
 
@@ -811,18 +645,9 @@ def main():
 
 	for site in sites:
 		logger.info(f'---- 开始处理站点 [{site["name"]}] {site["base_url"]} ----')
-		runtime = prepare_site_runtime(site)
-
-		if not runtime.get('ready'):
-			error = 'WAF 探测失败，且该站点配置了 waf=true'
-			logger.error(f'[{site["name"]}] {error}')
-			for account in site['accounts']:
-				results.append(empty_result(site, account, error=error))
-			continue
-
 		for account in site['accounts']:
 			try:
-				result = check_in_account(site, account, runtime)
+				result = check_in_account(site, account)
 			except Exception as e:
 				result = empty_result(site, account, error=f'处理异常：{str(e)[:80]}')
 				logger.error(f'[{site["name"]}/{account["name"]}] 处理异常：{e}')

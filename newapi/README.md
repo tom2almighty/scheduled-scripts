@@ -4,11 +4,13 @@
 
 ## 依赖
 
+在青龙「依赖管理 → Python3」中添加：
+
 ```bash
 curl_cffi loguru
 ```
 
-无须安装 Chromium 等任何 Linux 系统依赖。
+无须安装任何 Linux 系统依赖。
 
 ## 青龙任务
 
@@ -16,51 +18,44 @@ curl_cffi loguru
 30 9 * * * python3 /ql/data/scripts/newapi/newapi.py
 ```
 
-实际路径按你的青龙脚本目录调整。
-
 ## 环境变量
 
-只需要配置 `NEWAPI_SITES`：
+在青龙「环境变量」中配置 `NEWAPI_SITES`：
 
 ```json
 [
   {
-    "name": "AnyRouter",
-    "base_url": "https://anyrouter.top",
-    "checkin_endpoint": "/api/user/sign_in",
-    "user_info_endpoint": "/api/user/self",
-    "waf": true,
+    "name": "站点A",
+    "base_url": "https://api.example.com",
     "accounts": [
       {
-        "name": "主号",
-        "cookie": "session=xxx",
-        "api_user": "12345"
-      }
-    ]
-  },
-  {
-    "name": "其他站点",
-    "base_url": "https://example.com",
-    "checkin_endpoint": "/api/user/checkin",
-    "waf": "auto",
-    "accounts": [
+        "name": "主号（系统令牌）",
+        "token": "sk-xxxx",
+        "api_user": "1001"
+      },
       {
-        "name": "账号A",
-        "cookie": "session=yyy"
+        "name": "副号（Cookie）",
+        "cookie": "session=xxxx"
       }
     ]
   }
 ]
 ```
 
-字段说明：
+### 字段说明
 
+#### 站点配置
+- `name`：站点名称，选填，默认从域名自动提取
 - `base_url`：站点地址，必填
-- `checkin_endpoint`：签到接口，默认 `/api/user/checkin`
-- `user_info_endpoint`：余额接口，默认 `/api/user/self`
-- `waf`：`true` / `false` / `"auto"`，默认 `"auto"`
-- `cookie`：账号 Cookie，支持字符串或对象
-- `api_user`：可选，存在时写入请求头 `new-api-user`
+- `accounts`：账号列表，必填
+- `checkin_endpoint`：签到接口路径，选填，默认 `/api/user/checkin`（遇 404 会自动尝试 `/api/user/sign_in`）
+- `user_info_endpoint`：余额接口路径，选填，默认 `/api/user/self`
+
+#### 账号配置
+- `name`：账号名称，选填，默认自动编号
+- `token`：系统访问令牌（网站「个人设置 - 安全设置 - 系统访问令牌」生成），推荐
+- `cookie`：登录 Cookie，支持 `session=xxx` 字符串或 JSON 对象；与 `token` 二选一
+- `api_user`：用户 ID，选填，存在时会携带 `New-Api-User` 请求头
 
 ## 可选环境变量
 
