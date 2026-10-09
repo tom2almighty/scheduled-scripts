@@ -71,3 +71,26 @@ requests
 VMISS 的 Cloudflare 对 `/store/us-los-angeles-tri/*` 下的商品页路径启用了访问拦截，直接请求会返回 403，因此脚本只监控分类页、不尝试自动下单。收到补货通知后需手动下单。
 
 脚本自身日志为普通文本，状态文件默认写在脚本同级 `.data/` 目录。青龙如需持久化，可将 `VMISS_STATE_FILE` 指向 `/ql/data` 下的路径。
+
+## 常见问题
+
+### 拉取失败：Cloudflare 硬拦截
+
+```text
+[VMISS] 拉取 /store/us-los-angeles-tri 失败：Cloudflare 硬拦截：当前出口 IP 被拉黑 (cf-ray ...)，需更换出口 IP 或走代理
+```
+
+青龙所在 VPS 的出口 IP 被 Cloudflare 判为风险 IP，返回 `Sorry, you have been blocked`。这是 IP 层面的拦截，改 UA、加 Cookie 都无效。可用的处理方式：
+
+- 给脚本配置 `VMISS_PROXY`，走一个未被拦截的出口
+- 更换 VPS 或该 VPS 的出口 IP
+
+被拦截时脚本会推送一次异常通知，并保留上次库存，不会误判成缺货。
+
+### 拉取失败：Cloudflare 人机验证
+
+```text
+[VMISS] 拉取 /store/us-los-angeles-tri 失败：Cloudflare 人机验证：需真实浏览器才能通过
+```
+
+返回的是挑战页（`Just a moment...`），纯 HTTP 请求无法通过。同样通过 `VMISS_PROXY` 换出口，或改用浏览器方案。

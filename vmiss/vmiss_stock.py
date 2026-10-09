@@ -39,7 +39,10 @@ UA = (
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_STATE_FILE = os.path.join(SCRIPT_DIR, ".data", "vmiss_stock.json")
 DEFAULT_TARGETS = [{"store": "us-los-angeles-tri", "plans": ["US.LA.TRI.Basic"]}]
-CF_MARKERS = ("Attention Required", "Just a moment", "cf-chl", "cf_chl_opt")
+# CF 硬拦截：IP / 规则被拉黑，返回 "Sorry, you have been blocked"
+CF_BLOCK_MARKERS = ("Sorry, you have been blocked", "Attention Required")
+# CF 挑战页：需要执行 JS 验证，返回 "Just a moment..."
+CF_CHALLENGE_MARKERS = ("Just a moment", "cf-chl", "cf_chl_opt", "challenge-platform")
 
 
 def _load_ql_send():
@@ -187,11 +190,19 @@ def fetch_store(session, store, timeout):
         "User-Agent": UA,
     }
     resp = session.get(url, headers=headers, timeout=timeout)
+    body = resp.text
+    ray = resp.headers.get("cf-ray", "")
+
+    if any(marker in body for marker in CF_BLOCK_MARKERS):
+        hint = f" (cf-ray {ray})" if ray else ""
+        raise RuntimeError(
+            f"Cloudflare 硬拦截：当前出口 IP 被拉黑{hint}，需更换出口 IP 或走代理"
+        )
+    if any(marker in body for marker in CF_CHALLENGE_MARKERS):
+        raise RuntimeError("Cloudflare 人机验证：需真实浏览器才能通过")
     if resp.status_code != 200:
         raise RuntimeError(f"HTTP {resp.status_code}")
-    if any(marker in resp.text for marker in CF_MARKERS):
-        raise RuntimeError("被 Cloudflare 拦截")
-    return resp.text
+    return body
 
 
 def load_state(path):
