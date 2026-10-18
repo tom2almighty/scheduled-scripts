@@ -154,19 +154,18 @@ def session_lock(session):
         yield
 
 
-def _load_ql_send():
-    """沿用 NodeSeek 脚本的青龙 notify.py 加载方式。"""
+def _load_notify_send():
+    """加载面板 notify.py 的 send 方法。"""
     try:
         from notify import send
 
         return send
     except Exception:
-        LOGGER.debug("默认导入路径未能加载青龙通知模块，继续查找", exc_info=True)
+        LOGGER.debug("默认导入路径未能加载面板通知模块，继续查找", exc_info=True)
 
     candidates = [
-        os.environ.get("QL_DIR", "") and os.path.join(os.environ["QL_DIR"], "scripts"),
-        "/ql/data/scripts",
-        "/ql/scripts",
+        os.environ.get("DAIDAI_NOTIFY_PY", "") and os.path.dirname(os.environ["DAIDAI_NOTIFY_PY"]),
+        os.environ.get("DAIDAI_SCRIPTS_DIR", ""),
         str(SCRIPT_DIR),
     ]
     for path in candidates:
@@ -182,23 +181,23 @@ def _load_ql_send():
                 return send
             except Exception:
                 LOGGER.debug(
-                    "从 %s 加载青龙通知模块失败，继续查找", path, exc_info=True
+                    "从 %s 加载面板通知模块失败，继续查找", path, exc_info=True
                 )
     return None
 
 
 def send_notification(content):
     LOGGER.info("运行汇总：\n%s", content)
-    send = _load_ql_send()
+    send = _load_notify_send()
     if send is None:
-        LOGGER.error("未找到可用的青龙通知模块 notify.py，通知内容已保留在日志中")
+        LOGGER.error("未找到可用的面板通知模块 notify.py，通知内容已保留在日志中")
         return False
     try:
         send("Telegram 多 Bot 签到", content)
-        LOGGER.info("已调用青龙 notify.py 的 send 方法")
+        LOGGER.info("已调用面板 notify.py 的 send 方法")
         return True
     except Exception:
-        LOGGER.exception("青龙通知调用失败")
+        LOGGER.exception("面板通知调用失败")
         return False
 
 

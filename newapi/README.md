@@ -1,10 +1,10 @@
 # NewAPI 多站点签到
 
-青龙脚本：支持多个 NewAPI 站点、每站点多个账号，自动签到并检查余额变化。
+呆呆面板脚本：支持多个 NewAPI 站点、每站点多个账号，自动签到并检查余额变化。
 
 ## 依赖
 
-在青龙「依赖管理 → Python3」中添加：
+在呆呆面板「依赖管理 → Python」中添加：
 
 ```bash
 curl_cffi loguru
@@ -12,15 +12,17 @@ curl_cffi loguru
 
 无须安装任何 Linux 系统依赖。
 
-## 青龙任务
+## 定时任务
 
 ```text
-30 9 * * * python3 /ql/data/scripts/newapi/newapi.py
+30 9 * * * task newapi/newapi.py
 ```
+
+或直接在面板「定时任务」中添加任务，命令填写 `task newapi/newapi.py` 或 `python3 newapi/newapi.py`。
 
 ## 环境变量
 
-在青龙「环境变量」中配置 `NEWAPI_SITES`：
+在呆呆面板「环境变量」中配置 `NEWAPI_SITES`：
 
 ```json
 [

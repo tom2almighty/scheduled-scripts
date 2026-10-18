@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NodeSeek 自动签到（青龙面板版），支持多账号。
+NodeSeek 自动签到（呆呆面板版），支持多账号。
 签到后调用 /api/account/credit/page-1 读取最新一条积分记录的余额（鸡腿总数）作为成功确认。
 
 cron: 30 9 * * *
@@ -19,7 +19,7 @@ import sys
 try:
     import requests
 except ImportError:
-    print("[NodeSeek] 缺少依赖 requests，请在青龙「依赖管理 → Python」中添加 requests 后重试。")
+    print("[NodeSeek] 缺少依赖 requests，请在呆呆面板「依赖管理 → Python」中添加 requests 后重试。")
     sys.exit(1)
 
 BASE = "https://www.nodeseek.com"
@@ -28,8 +28,8 @@ UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.
 TIMEOUT = 30
 
 
-def _load_ql_send():
-    """加载青龙 notify.py 的 send 方法。"""
+def _load_notify_send():
+    """加载面板 notify.py 的 send 方法。"""
     try:
         from notify import send  # type: ignore
 
@@ -38,9 +38,8 @@ def _load_ql_send():
         pass
 
     candidates = [
-        os.environ.get("QL_DIR", "") and os.path.join(os.environ["QL_DIR"], "scripts"),
-        "/ql/data/scripts",
-        "/ql/scripts",
+        os.environ.get("DAIDAI_NOTIFY_PY", "") and os.path.dirname(os.environ["DAIDAI_NOTIFY_PY"]),
+        os.environ.get("DAIDAI_SCRIPTS_DIR", ""),
         os.path.dirname(os.path.abspath(__file__)),
     ]
     for path in candidates:
@@ -55,7 +54,7 @@ def _load_ql_send():
     return None
 
 
-QL_SEND = _load_ql_send()
+NOTIFY_SEND = _load_notify_send()
 
 
 def parse_bool(v, default=True):
@@ -160,14 +159,15 @@ def checkin_one(session, cookie, random_mode):
 
 
 def notify(title, content):
-    if QL_SEND is None:
-        print(f"[NodeSeek] 未找到青龙通知模块，通知内容：\n【{title}】\n{content}")
+    if NOTIFY_SEND is None:
+        print(f"[NodeSeek] 未找到面板通知模块 notify.py，通知内容：\n【{title}】\n{content}")
         return
 
     try:
-        QL_SEND(title, content)
+        NOTIFY_SEND(title, content)
+        print("[NodeSeek] 面板通知发送成功")
     except Exception as e:
-        print(f"[NodeSeek] 通知发送失败: {e}")
+        print(f"[NodeSeek] 面板通知发送失败: {e}")
         print(f"【{title}】\n{content}")
 
 

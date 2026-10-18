@@ -1,6 +1,6 @@
 # NodeSeek 签到
 
-青龙脚本：支持多账号 NodeSeek 签到，并查询鸡腿余额。
+呆呆面板脚本：支持多账号 NodeSeek 签到，并查询鸡腿余额。
 
 ## 依赖
 
@@ -8,13 +8,13 @@
 pip install requests
 ```
 
-## 青龙任务
+## 定时任务
 
 ```text
-30 9 * * * python3 /ql/data/scripts/nodeseek/nodeseek.py
+30 9 * * * task nodeseek/nodeseek.py
 ```
 
-实际路径按你的青龙脚本目录调整。
+或直接在面板「定时任务」中添加任务，命令填写 `task nodeseek/nodeseek.py` 或 `python3 nodeseek/nodeseek.py`。
 
 ## 环境变量
 
@@ -43,4 +43,4 @@ cookie1&cookie2
 
 ## 通知
 
-使用青龙默认 `notify.py`，每次运行结束都会通知。
+使用呆呆面板自带 `notify.py`，每次运行结束都会通知。

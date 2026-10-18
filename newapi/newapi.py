@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NewAPI 多站点自动签到 —— 青龙面板版
+NewAPI 多站点自动签到 —— 呆呆面板版
 
 cron: 30 9 * * *
 new Env('NewAPI 自动签到');
 
 ----------------------------------------------------------------------------
-实现：多站点 + 多账号 + 签到 + 余额检查 + 余额变化检测 + 青龙通知
+实现：多站点 + 多账号 + 签到 + 余额检查 + 余额变化检测 + 面板通知
 依赖：curl_cffi loguru（纯 Python，零浏览器依赖，内置阿里 WAF 自动自愈）
-通知：复用青龙自带 notify.py 的 send(title, content)
+通知：复用呆呆面板自带 notify.py 的 send(title, content)
 
 环境变量：
   NEWAPI_SITES          多站点配置，JSON 格式，支持 Access Token 或 Cookie
@@ -60,10 +60,10 @@ except ImportError:
 
 
 # --------------------------------------------------------------------------- #
-# 青龙通知
+# 面板通知
 # --------------------------------------------------------------------------- #
-def _load_ql_send():
-	"""加载青龙 notify.py 的 send，找不到则返回 None。"""
+def _load_notify_send():
+	"""加载面板 notify.py 的 send，找不到则返回 None。"""
 	try:
 		from notify import send
 
@@ -72,9 +72,8 @@ def _load_ql_send():
 		pass
 
 	candidates = [
-		os.getenv('QL_DIR', '') and os.path.join(os.getenv('QL_DIR', ''), 'scripts'),
-		'/ql/data/scripts',
-		'/ql/scripts',
+		os.getenv('DAIDAI_NOTIFY_PY', '') and os.path.dirname(os.environ['DAIDAI_NOTIFY_PY']),
+		os.getenv('DAIDAI_SCRIPTS_DIR', ''),
 		os.path.dirname(os.path.abspath(__file__)),
 	]
 	for path in candidates:
@@ -89,19 +88,18 @@ def _load_ql_send():
 	return None
 
 
-QL_SEND = _load_ql_send()
+NOTIFY_SEND = _load_notify_send()
 
 
 def notify(title: str, content: str):
-	"""发送通知：优先走青龙 notify.send，否则仅打印到日志。"""
-	if QL_SEND:
+	"""发送通知：优先走面板 notify.send，否则仅打印到日志。"""
+	if NOTIFY_SEND:
 		try:
-			QL_SEND(title, content)
-			logger.info('已触发青龙通知推送')
+			NOTIFY_SEND(title, content)
+			logger.info('已触发面板通知推送')
 			return
 		except Exception as e:
-			logger.warning(f'青龙通知推送失败：{e}，回退到日志输出')
-
+			logger.warning(f'面板通知推送失败：{e}，回退到日志输出')
 	logger.info(f'\n【{title}】\n{content}')
 
 
@@ -528,7 +526,7 @@ def check_in_account(site: dict, account: dict) -> dict:
 	try:
 		from curl_cffi import requests as cffi_requests
 	except ImportError:
-		logger.error('缺少依赖 curl_cffi，请在青龙「依赖管理 → Python」中安装 curl_cffi')
+		logger.error('缺少依赖 curl_cffi，请在呆呆面板「依赖管理 → Python」中安装 curl_cffi')
 		return empty_result(site, account, error='缺少依赖 curl_cffi')
 
 	result = empty_result(site, account)
@@ -628,7 +626,7 @@ def build_notification(results: list, timestamp: str):
 
 
 def main():
-	logger.info('NewAPI 自动签到脚本启动（青龙版）')
+	logger.info('NewAPI 自动签到脚本启动（呆呆面板版）')
 
 	sites = load_sites()
 	if not sites:

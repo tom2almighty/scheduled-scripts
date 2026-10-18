@@ -1,12 +1,12 @@
 # Telegram 多 Bot 签到
 
-青龙脚本：使用一个 Telegram 账号，向多个 bot 发送各自配置的命令，收集回复并通过青龙自带的 `notify.py` 的 `send(title, content)` 汇总通知。
+呆呆面板脚本：使用一个 Telegram 账号，向多个 bot 发送各自配置的命令，收集回复并通过面板自带的 `notify.py` 的 `send(title, content)` 汇总通知。
 
 ## 依赖
 
 运行环境：Linux / macOS，Python 3.10 及以上。
 
-在青龙「依赖管理 → Python」中安装：
+在呆呆面板「依赖管理 → Python」中安装：
 
 ```text
 telethon>=1.40,<2
@@ -17,16 +17,16 @@ python-socks[asyncio]>=2.0,<3
 ## 配置与登录
 
 1. 在 [my.telegram.org](https://my.telegram.org) 的 API development tools 中创建应用，获取 `api_id` 和 `api_hash`。
-2. 将本目录的 `.env.example` 复制为 `.env`，填写配置。也可在青龙环境变量中填写同名变量；青龙环境变量优先。
-3. 在青龙容器的交互式终端执行一次登录：
+2. 将本目录的 `.env.example` 复制为 `.env`，填写配置。也可在面板「环境变量」中填写同名变量；环境变量优先。
+3. 在呆呆面板容器或管理页的「系统命令行」中执行一次登录：
 
 ```bash
-python3 /ql/data/scripts/qlscripts/telegram/tg_checkin.py --login
+python3 telegram/tg_checkin.py --login
 ```
 
 按提示输入手机号、登录验证码，以及账号开启两步验证时的密码。`--login` 只保存会话。定时任务会复用会话；会话失效时会报错并通知，需要重新在终端登录。
 
-青龙面板中配置的变量不一定会自动进入手动打开的终端。首次登录时可使用脚本同目录的 `.env`，确保登录和定时任务使用相同的 API 凭据及 `TG_SESSION_FILE`。
+首次登录时建议使用脚本同目录的 `.env`，确保登录和定时任务使用相同的 API 凭据及 `TG_SESSION_FILE`。
 
 必填变量：
 
@@ -36,7 +36,7 @@ python3 /ql/data/scripts/qlscripts/telegram/tg_checkin.py --login
 | `TG_API_HASH` | Telegram 应用的 API hash |
 | `TG_BOTS` | bot 配置的 JSON 数组；仅执行 `--login` 时可省略 |
 
-`TG_BOTS` 示例，在青龙环境变量中直接粘贴以下 JSON：
+`TG_BOTS` 示例，在呆呆面板环境变量中直接粘贴以下 JSON：
 
 ```json
 [
@@ -57,34 +57,36 @@ python3 /ql/data/scripts/qlscripts/telegram/tg_checkin.py --login
 | `TG_REPLY_WAIT` | `3` | 收到回复后，连续多少秒没有新回复或内容更新就结束收集 |
 | `TG_PROXY` | 空 | `socks5://主机:端口` 或 `http://主机:端口`，可包含用户名和密码 |
 
-青龙建议将 `TG_SESSION_FILE` 设为 `/ql/data/tg-checkin/account.session`，存放在持久化数据目录中。会话文件包含账号登录凭据，应与 `.env` 一起妥善保管。脚本通过文件锁避免同一会话同时运行多个任务。
+呆呆面板建议将 `TG_SESSION_FILE` 设为持久化目录（如 `/app/Dumb-Panel/data/tg-checkin/account.session` 或脚本目录内的 `.data/account.session`）。会话文件包含账号登录凭据，应妥善保管。脚本通过文件锁避免同一会话同时运行多个任务。
 
 运行环境需能连接 Telegram；使用代理时，填写容器内可访问的地址。需要先启动或绑定账号的 bot，请先在 Telegram 中完成准备。
 
-## 青龙任务与通知
+## 定时任务与通知
 
-任务命令（路径相对于青龙的 `/ql/data/scripts`，按实际拉取目录调整）：
+任务命令：
 
 ```text
-task qlscripts/telegram/tg_checkin.py
+task telegram/tg_checkin.py
 ```
 
-定时规则：每天 09:30 执行，使用青龙面板的时区。
+或 `python3 telegram/tg_checkin.py`。
+
+定时规则：每天 09:30 执行，使用面板的时区。
 
 ```text
 30 9 * * *
 ```
 
-每次运行结束调用一次青龙 `notify.py` 的 `send`，通知包含各 bot 的用户名、命令、执行状态及回复原文。通知渠道沿用面板配置。
+每次运行结束调用一次面板 `notify.py` 的 `send`，通知包含各 bot 的用户名、命令、执行状态及回复原文。通知渠道沿用面板配置。
 
-通知模块与 NodeSeek 脚本使用相同的加载方式，支持 `$QL_DIR/scripts`、`/ql/data/scripts`、`/ql/scripts` 和脚本同目录的 `notify.py`。
+通知模块通过面板环境自动注入的 `PYTHONPATH`、`$DAIDAI_NOTIFY_PY` 及脚本同目录查找 `notify.py`。
 
 - 收集本次命令之后该 bot 发来的多条消息；同一条回复被编辑时，保留最后收到的内容。
 - 回复文字及媒体说明文字原样保留，图片和附件显示文字标记。通知为文本内容。
 - 默认首条回复等待受 30 秒总时限约束；收到后连续 3 秒没有变化便结束。回复间隔较长时，增大 `TG_REPLY_WAIT` 和对应 bot 的 `timeout`。
 - 「已收到回复」表示收到了消息，具体签到结果以 bot 原文为准。
 - 单个 bot 出错或未回复会继续处理其他 bot；Telegram 限流或账号登录失效时，停止后续发送并通知。
-- 配置错误、连接失败、等待超时仍无回复和通知模块调用异常会以非零状态退出。通知渠道的实际投递结果以青龙通知模块日志为准。
+- 配置错误、连接失败、等待超时仍无回复和通知模块调用异常会以非零状态退出。通知渠道的实际投递结果以面板通知模块日志为准。
 
 找不到 `notify.py` 或调用失败时，汇总内容仍会保留在日志中，并以非零状态退出。脚本自身日志使用 JSON 格式。
 
