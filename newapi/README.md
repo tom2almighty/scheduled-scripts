@@ -50,14 +50,38 @@ curl_cffi loguru
 - `name`：站点名称，选填，默认从域名自动提取
 - `base_url`：站点地址，必填
 - `accounts`：账号列表，必填
-- `checkin_endpoint`：签到接口路径，选填，默认 `/api/user/checkin`（遇 404 会自动尝试 `/api/user/sign_in`）
+- `checkin_mode`：签到模式，选填，默认 `api`
+  - `api`：`POST /api/user/checkin`，遇到 404 自动尝试 `/api/user/sign_in`
+  - `login`：登录即签到，不请求签到接口，由账号信息请求触发（AgentRouter 等站点使用）
+- `checkin_endpoint`：签到接口路径，选填，默认 `/api/user/checkin`，仅 `api` 模式生效
 - `user_info_endpoint`：余额接口路径，选填，默认 `/api/user/self`
 
 #### 账号配置
 - `name`：账号名称，选填，默认自动编号
 - `token`：系统访问令牌（网站「个人设置 - 安全设置 - 系统访问令牌」生成），推荐
 - `cookie`：登录 Cookie，支持 `session=xxx` 字符串或 JSON 对象；与 `token` 二选一
-- `api_user`：用户 ID，选填，存在时会携带 `New-Api-User` 请求头
+- `api_user`：用户 ID，选填，存在时会携带 `New-Api-User` 请求头；`checkin_mode` 为 `login` 时必须填写
+
+AgentRouter 这类“登录即签到”的站点配置示例：
+
+```json
+[
+  {
+    "name": "AgentRouter",
+    "base_url": "https://你的站点域名",
+    "checkin_mode": "login",
+    "accounts": [
+      {
+        "name": "主号",
+        "cookie": "session=xxxx",
+        "api_user": "12345"
+      }
+    ]
+  }
+]
+```
+
+脚本会先请求 `user_info_endpoint`，该请求本身触发签到，随后直接按成功处理，不再请求签到接口。
 
 ## 可选环境变量
 

@@ -247,6 +247,10 @@ def _normalize_site(raw: dict, index: int):
 	name = _strip(raw.get('name')) or site_host(base_url)
 	raw_checkin = _strip(raw.get('checkin_endpoint'))
 	checkin_endpoint = normalize_path(raw_checkin, DEFAULT_CHECKIN_ENDPOINT)
+	checkin_mode = _strip(raw.get('checkin_mode')).lower() or 'api'
+	if checkin_mode not in ('api', 'login'):
+		logger.warning(f'[{name}] 未知 checkin_mode={checkin_mode}，按 api 处理')
+		checkin_mode = 'api'
 	user_info_endpoint = normalize_path(raw.get('user_info_endpoint'), DEFAULT_USER_INFO_ENDPOINT)
 
 	raw_accounts = raw.get('accounts')
@@ -281,6 +285,7 @@ def _normalize_site(raw: dict, index: int):
 		'host': site_host(base_url),
 		'checkin_url': build_url(base_url, checkin_endpoint),
 		'user_info_url': build_url(base_url, user_info_endpoint),
+		'checkin_mode': checkin_mode,
 		'custom_checkin': bool(raw_checkin),
 		'accounts': accounts,
 		'index': index,
@@ -457,8 +462,13 @@ def get_user_info(session, site: dict, account: dict, cookies: dict):
 	}
 
 
-def do_checkin(session, site: dict, account: dict, cookies: dict):
+def do_checkin(session, site: dict, account: dict, cookies: dict, info=None):
 	"""执行签到，优先使用配置/默认端点，遇到 404 自适应 fallback 到旧版接口。"""
+	if site.get('checkin_mode') == 'login':
+		if info is None:
+			return 'failed', '登录签到失败：用户信息接口不可用'
+		return 'success', '登录即签到，余额已刷新'
+
 	endpoint = site['checkin_url']
 	headers = _build_headers(account, is_post=True)
 
@@ -542,7 +552,7 @@ def check_in_account(site: dict, account: dict) -> dict:
 			result['used'] = info['used']
 			logger.info(f'[{site["name"]}/{name}] 当前余额：${info["quota"]}（已用 ${info["used"]}）')
 
-		status, message = do_checkin(session, site, account, cookies)
+		status, message = do_checkin(session, site, account, cookies, info)
 		result['status'] = status
 		result['message'] = message
 		if status == 'success':
