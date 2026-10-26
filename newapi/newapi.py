@@ -12,7 +12,10 @@ new Env('NewAPI 自动签到');
 通知：复用呆呆面板自带 notify.py 的 send(title, content)
 
 环境变量：
-  NEWAPI_SITES          多站点配置，JSON 格式，支持 Access Token 或 Cookie
+  NEWAPI_SITES          多站点配置，JSON 格式。站点 provider 支持：
+                        default     通用 NewAPI：访问令牌直接签到，也支持 Cookie / OAuth
+                        anyrouter   Cookie 签到
+                        agentrouter OAuth 重新登录签到
   NOTIFY_TRIGGERS       通知触发条件，逗号分隔，默认 always
                         可选值：always / never / success / failed / balance_changed
   NEWAPI_DATA_DIR       余额记录文件存放目录，默认脚本同级目录
@@ -25,9 +28,8 @@ import json
 import os
 import re
 import sys
-import time
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 # --------------------------------------------------------------------------- #
@@ -107,9 +109,23 @@ def notify(title: str, content: str):
 # 常量
 # --------------------------------------------------------------------------- #
 QUOTA_PER_DOLLAR = 500000
-DEFAULT_CHECKIN_ENDPOINT = '/api/user/checkin'
-FALLBACK_CHECKIN_ENDPOINT = '/api/user/sign_in'
-DEFAULT_USER_INFO_ENDPOINT = '/api/user/self'
+PROVIDERS = {
+	'default': {
+		'user_info_endpoint': '/api/user/self',
+		'checkin_endpoint': '/api/user/checkin',
+		'status_endpoint': '/api/user/checkin',
+	},
+	'anyrouter': {
+		'user_info_endpoint': '/api/user/self',
+		'checkin_endpoint': '/api/user/sign_in',
+		'status_endpoint': None,
+	},
+	'agentrouter': {
+		'user_info_endpoint': '/api/user/self',
+		'checkin_endpoint': None,
+		'status_endpoint': None,
+	},
+}
 
 DATA_DIR = os.getenv('NEWAPI_DATA_DIR') or os.path.dirname(os.path.abspath(__file__))
 BALANCE_FILE = os.path.join(DATA_DIR, 'newapi_balance.json')
@@ -121,6 +137,12 @@ WAF_MASK = (
 	6, 11, 39, 18, 20, 8, 14, 21, 32, 26, 2, 30, 7, 4, 17, 5, 3, 28, 34,
 	37, 12, 36,
 )
+
+GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize'
+LINUXDO_AUTHORIZE_URL = 'https://connect.linux.do/oauth2/authorize'
+OAUTH_LABELS = {'github': 'GitHub', 'linuxdo': 'LinuxDO'}
+OAUTH_MAX_HOPS = 10
+_STATUS_CACHE = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -208,7 +230,7 @@ def parse_cookies(cookies_data) -> dict:
 	return {}
 
 
-def _normalize_account(raw: dict, site_name: str, site_index: int, account_index: int):
+def _normalize_account(raw: dict, site_provider: str, site_name: str, site_index: int, account_index: int):
 	if not isinstance(raw, dict):
 		logger.warning(f'[{site_name}] 跳过无效账号配置：账号必须是对象')
 		return None
@@ -217,21 +239,60 @@ def _normalize_account(raw: dict, site_name: str, site_index: int, account_index
 	token = _strip(raw.get('token'))
 	raw_cookie = raw.get('cookie')
 	cookies = parse_cookies(raw_cookie) if raw_cookie else {}
+	github_session = _strip(raw.get('github_session'))
+	linuxdo_session = _strip(raw.get('linuxdo_session'))
+	oauth_provider = 'github' if github_session else ('linuxdo' if linuxdo_session else '')
+	has_oauth = bool(oauth_provider)
 
-	if not token and not cookies:
-		logger.warning(f'[{site_name}/{name}] 跳过账号：缺少 token 或 cookie')
+	if not token and not cookies and not has_oauth:
+		logger.warning(f'[{site_name}/{name}] 跳过账号：缺少 token、cookie、github_session 或 linuxdo_session')
 		return None
 
-	ident = token or json.dumps(cookies, sort_keys=True)
+	# 认证优先级：AgentRouter 只认 OAuth；通用站优先访问令牌，其次 Cookie，最后 OAuth
+	if site_provider == 'agentrouter':
+		if not has_oauth:
+			logger.warning(
+				f'[{site_name}/{name}] 跳过账号：AgentRouter 需要配置 github_session 或 linuxdo_session'
+			)
+			return None
+		auth_mode = 'oauth'
+	elif site_provider == 'default':
+		auth_mode = 'token' if token else ('cookie' if cookies else ('oauth' if has_oauth else ''))
+	else:
+		auth_mode = 'cookie' if cookies else ('token' if token else ('oauth' if has_oauth else ''))
+
+	if auth_mode == 'token':
+		ident = token
+	elif auth_mode == 'oauth':
+		ident = f'{oauth_provider}:{github_session or linuxdo_session}'
+	elif auth_mode == 'cookie':
+		ident = json.dumps(cookies, sort_keys=True)
+	else:
+		ident = f'{site_name}:{name}:{account_index}'
+
 	return {
 		'name': name,
 		'token': token,
 		'cookies': cookies,
 		'api_user': _strip(raw.get('api_user')),
+		'github_session': github_session,
+		'linuxdo_session': linuxdo_session,
+		'github_cookies': parse_cookies(raw.get('github_cookies')) if raw.get('github_cookies') else {},
+		'linuxdo_cookies': parse_cookies(raw.get('linuxdo_cookies')) if raw.get('linuxdo_cookies') else {},
+		'oauth_provider': oauth_provider,
+		'auth_mode': auth_mode,
 		'ident_hash': hashlib.sha256(ident.encode('utf-8')).hexdigest(),
 		'index': account_index,
 		'site_index': site_index,
 	}
+
+
+def _resolve_endpoint(raw: dict, key: str, default):
+	"""读取可覆盖的接口路径；显式传空字符串表示禁用该接口。"""
+	if key not in raw:
+		return default
+	value = _strip(raw.get(key))
+	return value or None
 
 
 def _normalize_site(raw: dict, index: int):
@@ -245,13 +306,15 @@ def _normalize_site(raw: dict, index: int):
 		return None
 
 	name = _strip(raw.get('name')) or site_host(base_url)
-	raw_checkin = _strip(raw.get('checkin_endpoint'))
-	checkin_endpoint = normalize_path(raw_checkin, DEFAULT_CHECKIN_ENDPOINT)
-	checkin_mode = _strip(raw.get('checkin_mode')).lower() or 'api'
-	if checkin_mode not in ('api', 'login'):
-		logger.warning(f'[{name}] 未知 checkin_mode={checkin_mode}，按 api 处理')
-		checkin_mode = 'api'
-	user_info_endpoint = normalize_path(raw.get('user_info_endpoint'), DEFAULT_USER_INFO_ENDPOINT)
+	provider = _strip(raw.get('provider')).lower() or 'default'
+	if provider not in PROVIDERS:
+		logger.warning(f'[{name}] 未知站点类型 provider={provider}，可选值：{", ".join(PROVIDERS)}')
+		return None
+
+	defaults = PROVIDERS[provider]
+	user_info_endpoint = normalize_path(raw.get('user_info_endpoint'), defaults['user_info_endpoint'])
+	checkin_endpoint = _resolve_endpoint(raw, 'checkin_endpoint', defaults['checkin_endpoint'])
+	status_endpoint = _resolve_endpoint(raw, 'status_endpoint', defaults['status_endpoint'])
 
 	raw_accounts = raw.get('accounts')
 	if not isinstance(raw_accounts, list) or not raw_accounts:
@@ -261,7 +324,7 @@ def _normalize_site(raw: dict, index: int):
 	accounts = []
 	seen = set()
 	for account_index, account in enumerate(raw_accounts):
-		normalized = _normalize_account(account, name, index, account_index)
+		normalized = _normalize_account(account, provider, name, index, account_index)
 		if not normalized:
 			continue
 
@@ -283,10 +346,10 @@ def _normalize_site(raw: dict, index: int):
 		'name': name,
 		'base_url': base_url,
 		'host': site_host(base_url),
-		'checkin_url': build_url(base_url, checkin_endpoint),
+		'provider': provider,
+		'checkin_url': build_url(base_url, checkin_endpoint) if checkin_endpoint else None,
+		'status_url': build_url(base_url, status_endpoint) if status_endpoint else None,
 		'user_info_url': build_url(base_url, user_info_endpoint),
-		'checkin_mode': checkin_mode,
-		'custom_checkin': bool(raw_checkin),
 		'accounts': accounts,
 		'index': index,
 	}
@@ -321,7 +384,13 @@ def load_sites() -> list:
 		if not site:
 			continue
 
-		dedup_key = (site['base_url'], site['checkin_url'], site['user_info_url'])
+		dedup_key = (
+			site['base_url'],
+			site['provider'],
+			site['checkin_url'],
+			site['status_url'],
+			site['user_info_url'],
+		)
 		if dedup_key in seen:
 			logger.warning(f'[{site["name"]}] 跳过重复站点配置')
 			continue
@@ -335,7 +404,12 @@ def load_sites() -> list:
 # 余额记录（检测余额是否变化）
 # --------------------------------------------------------------------------- #
 def account_key(site: dict, account: dict) -> str:
-	identity = account.get('api_user') or account.get('token') or f'{account["name"]}#{account["index"]}'
+	identity = (
+		account.get('api_user')
+		or account.get('token')
+		or account.get('ident_hash')
+		or f'{account["name"]}#{account["index"]}'
+	)
 	raw = f'{site["base_url"]}|{identity}'
 	return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
@@ -376,7 +450,7 @@ def default_user_agent() -> str:
 	)
 
 
-def _build_headers(account: dict, is_post: bool = False) -> dict:
+def _build_headers(ctx: dict, is_post: bool = False) -> dict:
 	headers = {
 		'User-Agent': default_user_agent(),
 		'Accept': 'application/json, text/plain, */*',
@@ -386,25 +460,29 @@ def _build_headers(account: dict, is_post: bool = False) -> dict:
 		'Sec-Fetch-Mode': 'cors',
 		'Sec-Fetch-Site': 'same-origin',
 	}
-	token = account.get('token')
+	token = _strip(ctx.get('access_token')) or _strip(ctx.get('token'))
 	if token:
 		headers['Authorization'] = f'Bearer {token}'
-	api_user = account.get('api_user')
+	api_user = _strip(ctx.get('api_user'))
 	if api_user:
-		headers['New-Api-User'] = str(api_user)
+		headers['New-Api-User'] = api_user
 	if is_post:
 		headers['Content-Type'] = 'application/json'
 		headers['X-Requested-With'] = 'XMLHttpRequest'
 	return headers
 
 
-def request_with_waf_retry(session, method: str, url: str, headers: dict, cookies: dict, json_data=None):
+def request_with_waf_retry(
+	session, method: str, url: str, headers: dict, cookies: dict, json_data=None, params=None
+):
 	"""发送 HTTP 请求，若触发阿里 WAF 挑战则纯 Python 自动解算并重试一次。"""
 	kwargs = {
 		'headers': headers,
 		'cookies': cookies,
 		'timeout': 30,
 	}
+	if params is not None:
+		kwargs['params'] = params
 	if json_data is not None:
 		kwargs['json'] = json_data
 
@@ -432,9 +510,9 @@ def request_with_waf_retry(session, method: str, url: str, headers: dict, cookie
 	return resp, None
 
 
-def get_user_info(session, site: dict, account: dict, cookies: dict):
-	"""查询账号余额，返回 {'quota', 'used'} 或 None。"""
-	headers = _build_headers(account, is_post=False)
+def get_user_info(session, site: dict, account: dict, ctx: dict, cookies: dict):
+	"""查询账号余额，同时用响应里的用户 ID 补全 api_user。"""
+	headers = _build_headers(ctx, is_post=False)
 	resp, err = request_with_waf_retry(session, 'GET', site['user_info_url'], headers, cookies)
 	if err or resp is None:
 		logger.warning(f'[{site["name"]}/{account["name"]}] 获取用户信息网络异常：{err}')
@@ -456,32 +534,62 @@ def get_user_info(session, site: dict, account: dict, cookies: dict):
 		return None
 
 	user = data.get('data') or {}
+	api_user = _strip(user.get('id'))
+	if api_user and not _strip(ctx.get('api_user')):
+		ctx['api_user'] = api_user
 	return {
 		'quota': round(float(user.get('quota', 0) or 0) / QUOTA_PER_DOLLAR, 2),
 		'used': round(float(user.get('used_quota', 0) or 0) / QUOTA_PER_DOLLAR, 2),
 	}
 
 
-def do_checkin(session, site: dict, account: dict, cookies: dict, info=None):
-	"""执行签到，优先使用配置/默认端点，遇到 404 自适应 fallback 到旧版接口。"""
-	if site.get('checkin_mode') == 'login':
-		if info is None:
-			return 'failed', '登录签到失败：用户信息接口不可用'
-		return 'success', '登录即签到，余额已刷新'
+def get_checkin_status(session, site: dict, ctx: dict, cookies: dict):
+	"""查询今日签到状态：True 已签、False 未签、None 无状态接口或查询失败。"""
+	if not site.get('status_url'):
+		return None
 
-	endpoint = site['checkin_url']
-	headers = _build_headers(account, is_post=True)
+	tz_name = os.getenv('TZ') or 'Asia/Shanghai'
+	try:
+		month = datetime.now(ZoneInfo(tz_name)).strftime('%Y-%m')
+	except Exception:
+		month = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m')
 
-	resp, err = request_with_waf_retry(session, 'POST', endpoint, headers, cookies, json_data={})
+	resp, err = request_with_waf_retry(
+		session,
+		'GET',
+		site['status_url'],
+		_build_headers(ctx),
+		cookies,
+		params={'month': month},
+	)
+	if err or resp is None or resp.status_code != 200:
+		return None
+	try:
+		data = resp.json()
+	except Exception:
+		return None
+	if not (data.get('success') or data.get('ret') == 1 or data.get('code') == 0):
+		return None
+
+	stats = ((data.get('data') or {}).get('stats') or {}) if isinstance(data.get('data'), dict) else {}
+	value = stats.get('checked_in_today')
+	return bool(value) if value is not None else None
+
+
+def run_api_checkin(session, site: dict, ctx: dict, cookies: dict):
+	"""调用站点签到接口（NewAPI: /api/user/checkin，AnyRouter: /api/user/sign_in）。"""
+	endpoint = site.get('checkin_url')
+	if not endpoint:
+		return 'failed', '站点未配置签到接口'
+
+	if get_checkin_status(session, site, ctx, cookies) is True:
+		return 'already', '今日已签到'
+
+	resp, err = request_with_waf_retry(
+		session, 'POST', endpoint, _build_headers(ctx, is_post=True), cookies, json_data={}
+	)
 	if err or resp is None:
 		return 'failed', f'网络异常：{err}'
-
-	# 若默认端点 404 且未手动自定义，自适应回退到 /api/user/sign_in
-	if resp.status_code == 404 and not site.get('custom_checkin'):
-		fallback_url = build_url(site['base_url'], FALLBACK_CHECKIN_ENDPOINT)
-		resp_fb, err_fb = request_with_waf_retry(session, 'POST', fallback_url, headers, cookies, json_data={})
-		if not err_fb and resp_fb and resp_fb.status_code != 404:
-			resp = resp_fb
 
 	if resp.status_code != 200:
 		return 'failed', f'HTTP {resp.status_code}'
@@ -515,6 +623,299 @@ def do_checkin(session, site: dict, account: dict, cookies: dict, info=None):
 	return 'failed', msg or '签到失败'
 
 
+# --------------------------------------------------------------------------- #
+# OAuth 重新登录签到（GitHub / LinuxDO session）
+# --------------------------------------------------------------------------- #
+def build_github_cookies(account: dict) -> dict:
+	session_value = account.get('github_session') or ''
+	cookies = {
+		'user_session': session_value,
+		'logged_in': 'yes',
+		'__Host-user_session_same_site': session_value,
+	}
+	cookies.update(account.get('github_cookies') or {})
+	return cookies
+
+
+def build_linuxdo_cookies(account: dict) -> dict:
+	cookies = {'_forum_session': account.get('linuxdo_session') or ''}
+	cookies.update(account.get('linuxdo_cookies') or {})
+	return cookies
+
+
+def extract_oauth_code(value: str) -> str:
+	"""从重定向地址或 HTML 中提取 OAuth code，找不到返回空字符串。"""
+	if not value or 'access_denied' in value:
+		return ''
+	if value.startswith(('http://', 'https://', '/')):
+		codes = parse_qs(urlparse(value).query).get('code')
+		if codes:
+			return codes[0]
+	match = re.search(r'code(?:=|%3D)([A-Za-z0-9_-]+)', value)
+	return match.group(1) if match else ''
+
+
+def _sync_session_cookies(session, cookies: dict) -> None:
+	"""把 curl_cffi 会话中由回调写入的 cookie 同步到请求字典。"""
+	try:
+		for cookie in session.cookies.jar:
+			if cookie.name and cookie.value is not None:
+				cookies[cookie.name] = cookie.value
+	except Exception:
+		pass
+
+
+def get_oauth_client_id(session, site: dict, provider: str, cookies: dict) -> str:
+	"""从站点 /api/status 读取 OAuth client_id，避免写死。"""
+	cache_key = f'{site["base_url"]}|{provider}'
+	if cache_key in _STATUS_CACHE:
+		return _STATUS_CACHE[cache_key]
+
+	url = build_url(site['base_url'], '/api/status')
+	resp, err = request_with_waf_retry(session, 'GET', url, _build_headers({}), cookies)
+	if err or resp is None:
+		raise RuntimeError(f'获取站点状态失败：{err}')
+	if resp.status_code != 200:
+		raise RuntimeError(f'获取站点状态失败：HTTP {resp.status_code}')
+	try:
+		data = (resp.json() or {}).get('data') or {}
+	except Exception:
+		raise RuntimeError(f'获取站点状态失败：响应非 JSON（HTTP {resp.status_code}）')
+
+	field = f'{provider}_client_id'
+	client_id = _strip(data.get(field))
+	if not client_id:
+		raise RuntimeError(f'站点未开启 {OAUTH_LABELS[provider]} 登录或 /api/status 未返回 {field}')
+	_STATUS_CACHE[cache_key] = client_id
+	return client_id
+
+
+def fetch_oauth_state(session, site: dict, provider: str, cookies: dict):
+	"""获取 OAuth state，返回 (state, legacy)。
+
+	新版 NewAPI 用 POST {provider, intent} 返回 flow_token；旧版（AgentRouter）用 GET 返回签名 state。
+	"""
+	url = build_url(site['base_url'], '/api/oauth/state')
+
+	resp, err = request_with_waf_retry(
+		session,
+		'POST',
+		url,
+		_build_headers({}, is_post=True),
+		cookies,
+		json_data={'provider': provider, 'intent': 'login'},
+	)
+	if not err and resp is not None and resp.status_code == 200:
+		try:
+			body = resp.json()
+		except Exception:
+			body = None
+		if isinstance(body, dict) and body.get('success'):
+			payload = body.get('data')
+			if isinstance(payload, dict):
+				payload = payload.get('flow_token')
+			state = _strip(payload)
+			if state:
+				return state, False
+
+	resp, err = request_with_waf_retry(session, 'GET', url, _build_headers({}), cookies)
+	if err or resp is None:
+		raise RuntimeError(f'获取 OAuth state 失败：{err}')
+	if resp.status_code != 200:
+		raise RuntimeError(f'获取 OAuth state 失败：HTTP {resp.status_code}')
+	try:
+		data = resp.json()
+	except Exception:
+		text = (resp.text or '').lower()
+		hint = '（疑似被阿里 WAF 拦截）' if 'aliyun_waf' in text or 'acw_sc__v2' in text else ''
+		raise RuntimeError(f'获取 OAuth state 失败：响应非 JSON（HTTP {resp.status_code}）{hint}')
+	if not (data.get('success') and data.get('data')):
+		raise RuntimeError(f'获取 OAuth state 失败：{data.get("message") or "未知错误"}')
+	return _strip(data['data']), True
+
+
+def _authorize_github(session, client_id: str, state: str, account: dict) -> str:
+	cookies = build_github_cookies(account)
+	params = {'client_id': client_id, 'state': state, 'scope': 'user:email'}
+
+	resp = session.get(
+		GITHUB_AUTHORIZE_URL,
+		params=params,
+		cookies=cookies,
+		allow_redirects=False,
+		timeout=30,
+	)
+	location = resp.headers.get('location') or ''
+
+	if resp.status_code in (301, 302, 303, 307, 308):
+		code = extract_oauth_code(location)
+		if code:
+			return code
+		if '/login' in location:
+			raise RuntimeError('GitHub 登录态无效或已过期，请更新 github_session')
+		raise RuntimeError(f'GitHub 未返回授权码，跳转地址：{location[:150]}')
+
+	if resp.status_code != 200:
+		raise RuntimeError(f'GitHub 授权请求失败：HTTP {resp.status_code}')
+
+	html = resp.text or ''
+	code = extract_oauth_code(html)
+	if code:
+		return code
+
+	# 首次授权会返回确认表单，提交 authorize=1 与隐藏字段
+	action_match = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', html, re.I)
+	if not action_match:
+		title_match = re.search(r'<title>(.*?)</title>', html, re.I | re.S)
+		title = (title_match.group(1).strip() if title_match else '无标题')[:80]
+		raise RuntimeError(f'GitHub 未返回授权码（HTTP {resp.status_code}，页面标题：{title}）')
+
+	action = action_match.group(1)
+	if '/login/oauth/authorize' not in action:
+		raise RuntimeError(f'GitHub 返回了非授权页面（form action: {action[:120]}），请检查 github_session 是否有效')
+	if not action.startswith('http'):
+		action = f'https://github.com{action if action.startswith("/") else "/" + action}'
+
+	payload = {'authorize': '1'}
+	for tag in re.findall(r'<input[^>]*>', html, re.I):
+		if 'hidden' not in tag.lower():
+			continue
+		name_match = re.search(r'name=["\']([^"\']+)["\']', tag, re.I)
+		value_match = re.search(r'value=["\']([^"\']*)["\']', tag, re.I)
+		if name_match:
+			payload[name_match.group(1)] = value_match.group(1) if value_match else ''
+
+	post_resp = session.post(
+		action,
+		data=payload,
+		cookies=cookies,
+		allow_redirects=False,
+		timeout=30,
+	)
+	code = extract_oauth_code(post_resp.headers.get('location') or '')
+	if not code:
+		code = extract_oauth_code(post_resp.text or '')
+	if code:
+		return code
+	raise RuntimeError(f'GitHub 授权确认失败（HTTP {post_resp.status_code}）')
+
+
+def _authorize_linuxdo(session, client_id: str, state: str, account: dict) -> str:
+	"""手动跟随 LinuxDO SSO 跳转，在拿到回调 code 时立即停止，避免 code 被提前消费。"""
+	cookies = build_linuxdo_cookies(account)
+	params = {'response_type': 'code', 'client_id': client_id, 'state': state}
+	url = LINUXDO_AUTHORIZE_URL
+	resp = None
+
+	for hop in range(OAUTH_MAX_HOPS):
+		resp = session.get(
+			url,
+			params=params if hop == 0 else None,
+			cookies=cookies,
+			allow_redirects=False,
+			timeout=30,
+		)
+		location = resp.headers.get('location') or ''
+		code = extract_oauth_code(location)
+		if code:
+			return code
+		if resp.status_code in (301, 302, 303, 307, 308) and location:
+			url = urljoin(url, location)
+			continue
+		break
+
+	body = (resp.text or '') if resp is not None else ''
+	body_lower = body.lower()
+	if '/login' in url or 'login-account-name' in body:
+		raise RuntimeError('LinuxDO 登录态无效或已过期，请更新 linuxdo_session')
+	if 'just a moment' in body_lower or 'cf-chl' in body_lower or 'cf_chl_opt' in body_lower:
+		raise RuntimeError(
+			'LinuxDO 被 Cloudflare 拦截；建议优先使用 github_session，'
+			'或在 linuxdo_cookies 中补充同一出口 IP 与 UA 下的 cf_clearance'
+		)
+	if resp is not None and resp.status_code in (403, 429, 503):
+		raise RuntimeError(f'LinuxDO 授权被拦截（HTTP {resp.status_code}）；请稍后重试或改用 github_session')
+	if resp is not None and resp.status_code == 200:
+		raise RuntimeError('LinuxDO 未直接返回授权码，可能停在授权确认页；请先在浏览器完成一次授权')
+	status = resp.status_code if resp is not None else 'N/A'
+	raise RuntimeError(f'LinuxDO 授权失败（HTTP {status}）')
+
+
+def _oauth_callback(
+	session, site: dict, provider: str, code: str, state: str, cookies: dict, legacy: bool
+):
+	url = build_url(site['base_url'], f'/api/oauth/{provider}')
+	params = {'code': code, 'state': state}
+	if legacy:
+		params['mode'] = 'login'
+	resp, err = request_with_waf_retry(
+		session, 'GET', url, _build_headers({}), cookies, params=params
+	)
+	if err or resp is None:
+		return False, {}, f'OAuth 回调网络异常：{err}'
+	if resp.status_code != 200:
+		return False, {}, f'OAuth 回调失败：HTTP {resp.status_code}'
+	try:
+		body = resp.json()
+	except Exception:
+		return False, {}, 'OAuth 回调响应非 JSON'
+	if not body.get('success'):
+		return False, {}, body.get('message') or 'OAuth 回调登录失败'
+	return True, body.get('data') or {}, body.get('message') or ''
+
+
+def _oauth_login(session, site: dict, account: dict, ctx: dict, cookies: dict) -> dict:
+	"""用 GitHub / LinuxDO session 完成一次站点 OAuth 登录，返回回调数据。
+
+	登录成功后把 access_token、api_user 写入 ctx，站点会话 Cookie 同步进 cookies。
+	"""
+	provider = account['oauth_provider']
+	label = OAUTH_LABELS[provider]
+	logger.info(f'[{site["name"]}/{account["name"]}] 使用 {label} session 登录')
+
+	client_id = get_oauth_client_id(session, site, provider, cookies)
+	state, legacy = fetch_oauth_state(session, site, provider, cookies)
+	if provider == 'github':
+		code = _authorize_github(session, client_id, state, account)
+	else:
+		code = _authorize_linuxdo(session, client_id, state, account)
+
+	ok, data, message = _oauth_callback(session, site, provider, code, state, cookies, legacy)
+	if not ok:
+		raise RuntimeError(message)
+
+	_sync_session_cookies(session, cookies)
+
+	access_token = _strip(data.get('access_token'))
+	if access_token:
+		ctx['access_token'] = access_token
+
+	user = data.get('user') if isinstance(data.get('user'), dict) else {}
+	api_user = _strip(data.get('id') or user.get('id'))
+	if api_user:
+		ctx['api_user'] = api_user
+
+	if message:
+		logger.info(f'[{site["name"]}/{account["name"]}] OAuth 登录：{message}')
+	return data
+
+
+def _read_balance(session, site: dict, account: dict, ctx: dict, cookies: dict, label: str):
+	info = get_user_info(session, site, account, ctx, cookies)
+	if info:
+		logger.info(
+			f'[{site["name"]}/{account["name"]}] {label}余额：'
+			f'${info["quota"]}（已用 ${info["used"]}）'
+		)
+	return info
+
+
+def _fill_balance(result: dict, info):
+	if info:
+		result['quota'] = info['quota']
+		result['used'] = info['used']
+
+
 def empty_result(site: dict, account: dict, status='failed', error=None) -> dict:
 	return {
 		'site_name': site['name'],
@@ -532,38 +933,79 @@ def empty_result(site: dict, account: dict, status='failed', error=None) -> dict
 
 
 def check_in_account(site: dict, account: dict) -> dict:
-	"""单个账号：查余额 + 签到。"""
+	"""单个账号：登录 / 签到 / 余额对比。"""
 	try:
 		from curl_cffi import requests as cffi_requests
 	except ImportError:
 		logger.error('缺少依赖 curl_cffi，请在呆呆面板「依赖管理 → Python」中安装 curl_cffi')
 		return empty_result(site, account, error='缺少依赖 curl_cffi')
 
-	result = empty_result(site, account)
 	name = account['name']
-	logger.info(f'==== 开始处理 [{site["name"]}/{name}] ====')
-
+	auth = account.get('auth_mode') or 'token'
 	cookies = dict(account['cookies'])
+	ctx = {
+		'token': (account.get('token') or '') if auth == 'token' else '',
+		'access_token': '',
+		'api_user': account.get('api_user') or '',
+	}
 	session = cffi_requests.Session(impersonate='chrome')
+	result = empty_result(site, account)
+
 	try:
-		info = get_user_info(session, site, account, cookies)
-		if info:
-			result['quota'] = info['quota']
-			result['used'] = info['used']
-			logger.info(f'[{site["name"]}/{name}] 当前余额：${info["quota"]}（已用 ${info["used"]}）')
+		label = {'oauth': 'OAuth', 'cookie': 'Cookie', 'token': '令牌'}.get(auth, auth)
+		logger.info(f'==== 开始处理 [{site["name"]}/{name}]（{label}）====')
 
-		status, message = do_checkin(session, site, account, cookies, info)
-		result['status'] = status
-		result['message'] = message
-		if status == 'success':
-			logger.success(f'[{site["name"]}/{name}] 签到成功：{message}')
-		elif status == 'already':
-			logger.info(f'[{site["name"]}/{name}] 今日已签到：{message}')
-		else:
-			result['error'] = message
-			logger.error(f'[{site["name"]}/{name}] 签到失败：{message}')
+		try:
+			if site['provider'] == 'agentrouter':
+				if cookies:
+					_fill_balance(
+						result, _read_balance(session, site, account, ctx, cookies, '当前')
+					)
+				else:
+					logger.info(f'[{site["name"]}/{name}] 未配置站点 cookie，跳过签到前余额基线')
 
-		return result
+				data = _oauth_login(session, site, account, ctx, cookies)
+				result['api_user'] = ctx.get('api_user') or result['api_user']
+				_fill_balance(
+					result, _read_balance(session, site, account, ctx, cookies, '签到后')
+				)
+
+				if data.get('checked_in') is False:
+					result['status'] = 'already'
+					result['message'] = '登录成功，今日已签到'
+					logger.info(f'[{site["name"]}/{name}] {result["message"]}')
+				else:
+					result['status'] = 'success'
+					result['message'] = 'OAuth 重新登录完成，签到奖励已发放'
+					logger.success(f'[{site["name"]}/{name}] {result["message"]}')
+				return result
+
+			if auth == 'oauth':
+				_oauth_login(session, site, account, ctx, cookies)
+				result['api_user'] = ctx.get('api_user') or result['api_user']
+
+			_fill_balance(result, _read_balance(session, site, account, ctx, cookies, '当前'))
+
+			status, message = run_api_checkin(session, site, ctx, cookies)
+			result['status'] = status
+			result['message'] = message
+			if status == 'failed':
+				result['error'] = message
+				logger.error(f'[{site["name"]}/{name}] 签到失败：{message}')
+				return result
+
+			if status == 'success':
+				_fill_balance(result, _read_balance(session, site, account, ctx, cookies, '签到后'))
+				logger.success(f'[{site["name"]}/{name}] 签到成功：{message}')
+			else:
+				logger.info(f'[{site["name"]}/{name}] 今日已签到：{message}')
+			return result
+
+		except Exception as e:
+			result['status'] = 'failed'
+			result['error'] = str(e)[:200]
+			logger.error(f'[{site["name"]}/{name}] 处理失败：{result["error"]}')
+			return result
 	finally:
 		try:
 			session.close()
